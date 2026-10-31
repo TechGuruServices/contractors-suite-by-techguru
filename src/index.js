@@ -188,8 +188,13 @@ export default {
         
         if (!validPassword) return new Response(JSON.stringify({ error: "Invalid credentials" }), { status: 401, headers: corsHeaders });
         
-        const token = await cryptoUtils.generateJWT({ id: user.id, name: user.name, email: user.email, role: user.role }, env.JWT_SECRET);
-        return new Response(JSON.stringify({ token, user: { name: user.name, email: user.email, role: user.role } }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        // Subscription gate: ensure the is_subscribed column exists, then read it
+        try { await env.DB.prepare("SELECT is_subscribed FROM users LIMIT 1").all(); }
+        catch { try { await env.DB.prepare("ALTER TABLE users ADD COLUMN is_subscribed INTEGER DEFAULT 0").run(); } catch (_) {} }
+        const subscribed = user.is_subscribed === 1 ? 1 : 0;
+
+        const token = await cryptoUtils.generateJWT({ id: user.id, name: user.name, email: user.email, role: user.role, subscribed }, env.JWT_SECRET);
+        return new Response(JSON.stringify({ token, user: { name: user.name, email: user.email, role: user.role, subscribed } }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       } catch (err) {
         return new Response(JSON.stringify({ error: "Server login error", details: err.message }), { status: 500, headers: corsHeaders });
       }
@@ -249,13 +254,23 @@ export default {
         `).all();
         return new Response(JSON.stringify(results), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
+
+      // Admin: Activate a subscription for a user by email (subscription gate control)
+      if (url.pathname === "/api/admin/subscribe" && request.method === "POST") {
+        if (user.role !== 'admin') return new Response(JSON.stringify({ error: "Forbidden: Admin clearance required" }), { status: 403, headers: corsHeaders });
+        const { email } = await request.json();
+        if (!email) return new Response(JSON.stringify({ error: "Missing email" }), { status: 400, headers: corsHeaders });
+        try { await env.DB.prepare("ALTER TABLE users ADD COLUMN is_subscribed INTEGER DEFAULT 0").run(); } catch (_) {}
+        const result = await env.DB.prepare("UPDATE users SET is_subscribed = 1 WHERE email = ?").bind(email).run();
+        return new Response(JSON.stringify({ success: true, activated: result.changes }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
     }
 
     // ==========================================
     // FRONTEND UI PORTAL DELIVERY (SPA)
     // ==========================================
     if (request.method === "GET" && !url.pathname.startsWith("/api/")) {
-      const html = generateFrontendHTML();
+      const html = generateFrontendHTML(env.SUBSCRIBE_URL || "", env.DEMO_VIDEO_URL || "");
       return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
@@ -271,13 +286,15 @@ const TECHGURU_LOGO_B64 = "UklGRiIQAABXRUJQVlA4IBYQAADQNwCdASpgAGAAPiUOhkIhheK1y
 // ==========================================
 // PREMIUM FRONTEND HTML GENERATOR
 // ==========================================
-function generateFrontendHTML() {
+function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
+  const safeSubscribeUrl = (subscribeUrl || "").replace(/"/g, "&quot;");
+  const safeDemoVideoUrl = (demoVideoUrl || "").replace(/"/g, "&quot;");
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Contractor Pro CRM Suite</title>
+    <title>Contractor Pro CRM Suite · by TECHGURU</title>
     <meta name="description" content="Professional contractor CRM suite with customer management, field time tracking, review dispatch, and admin panel.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -288,7 +305,7 @@ function generateFrontendHTML() {
          DESIGN SYSTEM — CSS CUSTOM PROPERTIES
          ================================================ */
       :root {
-        /* Core palette — Deep dark with emerald accents */
+        /* Core palette — Deep dark with safety-orange construction accents */
         --bg-primary: #0a0e17;
         --bg-secondary: #111827;
         --bg-card: #151d2e;
@@ -300,7 +317,7 @@ function generateFrontendHTML() {
         --border-subtle: rgba(255, 255, 255, 0.06);
         --border-default: rgba(255, 255, 255, 0.1);
         --border-hover: rgba(255, 255, 255, 0.15);
-        --border-accent: rgba(52, 211, 153, 0.3);
+        --border-accent: rgba(249, 115, 22, 0.3);
 
         /* Text hierarchy */
         --text-primary: #f1f5f9;
@@ -309,10 +326,10 @@ function generateFrontendHTML() {
         --text-muted: #475569;
 
         /* Accent colors */
-        --accent-emerald: #34d399;
-        --accent-emerald-dim: #10b981;
-        --accent-emerald-glow: rgba(52, 211, 153, 0.15);
-        --accent-emerald-shadow: rgba(16, 185, 129, 0.25);
+        --accent-brand: #f97316;
+        --accent-brand-dim: #ea580c;
+        --accent-brand-glow: rgba(249, 115, 22, 0.15);
+        --accent-brand-shadow: rgba(234, 88, 12, 0.25);
         --accent-blue: #60a5fa;
         --accent-blue-dim: #3b82f6;
         --accent-amber: #fbbf24;
@@ -324,7 +341,7 @@ function generateFrontendHTML() {
         /* Gradients */
         --gradient-hero: linear-gradient(135deg, #0a0e17 0%, #111827 50%, #0d1b2a 100%);
         --gradient-card: linear-gradient(145deg, #151d2e 0%, #111827 100%);
-        --gradient-emerald: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+        --gradient-brand: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
         --gradient-blue: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);
         --gradient-rose: linear-gradient(135deg, #fb7185 0%, #f43f5e 100%);
         --gradient-glass: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
@@ -333,7 +350,7 @@ function generateFrontendHTML() {
         --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
         --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
         --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
-        --shadow-glow-emerald: 0 0 20px rgba(52, 211, 153, 0.15), 0 0 40px rgba(52, 211, 153, 0.05);
+        --shadow-glow-brand: 0 0 20px rgba(249, 115, 22, 0.15), 0 0 40px rgba(249, 115, 22, 0.05);
         --shadow-glow-blue: 0 0 20px rgba(96, 165, 250, 0.15);
         --shadow-glow-rose: 0 0 20px rgba(251, 113, 133, 0.15);
 
@@ -385,7 +402,7 @@ function generateFrontendHTML() {
         right: -200px;
         width: 600px;
         height: 600px;
-        background: radial-gradient(circle, rgba(52, 211, 153, 0.04) 0%, transparent 70%);
+        background: radial-gradient(circle, rgba(249, 115, 22, 0.04) 0%, transparent 70%);
         pointer-events: none;
         z-index: 0;
       }
@@ -486,8 +503,8 @@ function generateFrontendHTML() {
       }
 
       @keyframes pulse-glow {
-        0%, 100% { box-shadow: 0 0 8px rgba(52, 211, 153, 0.2); }
-        50% { box-shadow: 0 0 20px rgba(52, 211, 153, 0.4); }
+        0%, 100% { box-shadow: 0 0 8px rgba(249, 115, 22, 0.2); }
+        50% { box-shadow: 0 0 20px rgba(249, 115, 22, 0.4); }
       }
 
       @keyframes shimmer {
@@ -532,7 +549,7 @@ function generateFrontendHTML() {
 
       .card-accent {
         border-color: var(--border-accent);
-        box-shadow: var(--shadow-glow-emerald);
+        box-shadow: var(--shadow-glow-brand);
       }
 
       /* ================================================
@@ -569,12 +586,12 @@ function generateFrontendHTML() {
       .btn:active { transform: scale(0.97); }
 
       .btn-primary {
-        background: var(--gradient-emerald);
+        background: var(--gradient-brand);
         color: #022c22;
-        box-shadow: 0 2px 8px var(--accent-emerald-shadow);
+        box-shadow: 0 2px 8px var(--accent-brand-shadow);
       }
       .btn-primary:hover {
-        box-shadow: var(--shadow-glow-emerald);
+        box-shadow: var(--shadow-glow-brand);
         transform: translateY(-1px);
       }
 
@@ -648,8 +665,8 @@ function generateFrontendHTML() {
       }
 
       .input:focus {
-        border-color: var(--accent-emerald);
-        box-shadow: 0 0 0 3px var(--accent-emerald-glow);
+        border-color: var(--accent-brand);
+        box-shadow: 0 0 0 3px var(--accent-brand-glow);
       }
 
       .input-group {
@@ -680,7 +697,7 @@ function generateFrontendHTML() {
         border-radius: var(--radius-full);
       }
 
-      .badge-emerald { background: rgba(52, 211, 153, 0.12); color: var(--accent-emerald); }
+      .badge-brand { background: rgba(249, 115, 22, 0.12); color: var(--accent-brand); }
       .badge-amber { background: rgba(251, 191, 36, 0.12); color: var(--accent-amber); }
       .badge-blue { background: rgba(96, 165, 250, 0.12); color: var(--accent-blue); }
       .badge-rose { background: rgba(251, 113, 133, 0.12); color: var(--accent-rose); }
@@ -737,7 +754,7 @@ function generateFrontendHTML() {
 
       .nav-btn:hover,
       .nav-btn.active {
-        color: var(--accent-emerald);
+        color: var(--accent-brand);
       }
 
       .nav-btn:hover i,
@@ -753,7 +770,7 @@ function generateFrontendHTML() {
         transform: translateX(-50%);
         width: 20px;
         height: 2px;
-        background: var(--accent-emerald);
+        background: var(--accent-brand);
         border-radius: var(--radius-full);
       }
 
@@ -802,7 +819,7 @@ function generateFrontendHTML() {
         left: 0;
         right: 0;
         height: 3px;
-        background: var(--gradient-emerald);
+        background: var(--gradient-brand);
         border-radius: var(--radius-xl) var(--radius-xl) 0 0;
       }
 
@@ -869,8 +886,8 @@ function generateFrontendHTML() {
       }
 
       .status-dot.active {
-        background: var(--accent-emerald);
-        box-shadow: 0 0 6px var(--accent-emerald);
+        background: var(--accent-brand);
+        box-shadow: 0 0 6px var(--accent-brand);
         animation: pulse-glow 2s infinite;
       }
 
@@ -971,7 +988,7 @@ function generateFrontendHTML() {
       .customer-value .amount {
         font-size: 0.95rem;
         font-weight: 700;
-        color: var(--accent-emerald);
+        color: var(--accent-brand);
       }
 
       .customer-value .amount-label {
@@ -1001,7 +1018,7 @@ function generateFrontendHTML() {
         width: 56px;
         height: 56px;
         border-radius: 50%;
-        background: var(--gradient-emerald);
+        background: var(--gradient-brand);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -1009,7 +1026,7 @@ function generateFrontendHTML() {
         font-weight: 800;
         color: #022c22;
         margin: 0 auto 10px;
-        box-shadow: var(--shadow-glow-emerald);
+        box-shadow: var(--shadow-glow-brand);
       }
 
       .clock-buttons {
@@ -1040,12 +1057,12 @@ function generateFrontendHTML() {
       .clock-btn:active { transform: scale(0.96); }
 
       .clock-btn.clock-in {
-        background: var(--gradient-emerald);
+        background: var(--gradient-brand);
         color: #022c22;
-        box-shadow: 0 4px 16px var(--accent-emerald-shadow);
+        box-shadow: 0 4px 16px var(--accent-brand-shadow);
       }
       .clock-btn.clock-in:hover {
-        box-shadow: var(--shadow-glow-emerald);
+        box-shadow: var(--shadow-glow-brand);
         transform: translateY(-2px);
       }
 
@@ -1101,21 +1118,21 @@ function generateFrontendHTML() {
         width: 64px;
         height: 64px;
         border-radius: var(--radius-lg);
-        background: var(--gradient-emerald);
+        background: var(--gradient-brand);
         display: flex;
         align-items: center;
         justify-content: center;
         margin: 0 auto 16px;
         font-size: 1.6rem;
         color: #022c22;
-        box-shadow: var(--shadow-glow-emerald);
+        box-shadow: var(--shadow-glow-brand);
       }
 
       .login-logo h2 {
         font-size: 1.5rem;
         font-weight: 800;
         letter-spacing: -0.03em;
-        background: linear-gradient(135deg, var(--text-primary) 0%, var(--accent-emerald) 100%);
+        background: linear-gradient(135deg, var(--text-primary) 0%, var(--accent-brand) 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         background-clip: text;
@@ -1125,6 +1142,19 @@ function generateFrontendHTML() {
         font-size: 0.78rem;
         color: var(--text-muted);
         margin-top: 4px;
+      }
+
+      .login-logo .login-brandline {
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        color: var(--text-tertiary);
+        margin-top: 6px;
+      }
+
+      .login-logo .login-brandline span {
+        color: var(--accent-brand);
       }
 
       .login-footer {
@@ -1152,9 +1182,9 @@ function generateFrontendHTML() {
       }
 
       .toast-success {
-        background: rgba(16, 185, 129, 0.95);
+        background: rgba(234, 88, 12, 0.95);
         color: #022c22;
-        border: 1px solid rgba(52, 211, 153, 0.3);
+        border: 1px solid rgba(249, 115, 22, 0.3);
       }
 
       .toast-error {
@@ -1227,7 +1257,7 @@ function generateFrontendHTML() {
       .mt-4 { margin-top: 16px; }
       .mb-4 { margin-bottom: 16px; }
       .mb-6 { margin-bottom: 24px; }
-      .text-emerald { color: var(--accent-emerald); }
+      .text-brand { color: var(--accent-brand); }
       .text-amber { color: var(--accent-amber); }
       .text-rose { color: var(--accent-rose); }
       .text-blue { color: var(--accent-blue); }
@@ -1239,7 +1269,7 @@ function generateFrontendHTML() {
 
       /* ================================================
          GLOBAL FOOTER — POWERED BY TECHGURU
-         Dark purple, blues, pinks & emerald green neon
+         Safety-orange construction gradient
          ================================================ */
       .app-global-footer {
         width: 100%;
@@ -1301,7 +1331,7 @@ function generateFrontendHTML() {
         height: 36px;
         border-radius: 50%;
         padding: 2px;
-        background: linear-gradient(135deg, #00d2ff 0%, #7e22ce 33%, #ff007f 66%, #00ff87 100%);
+        background: linear-gradient(135deg, #fbbf24 0%, #f97316 50%, #ea580c 100%);
         background-size: 250% 250%;
         animation: techguruHaloSpin 4.5s linear infinite;
         flex-shrink: 0;
@@ -1345,7 +1375,7 @@ function generateFrontendHTML() {
         margin-bottom: 2px;
       }
 
-      /* Animated TECHGURU text with flowing rainbow neon gradient (Crisp, no glow) */
+      /* Animated TECHGURU text with flowing safety-orange construction gradient (Crisp, no glow) */
       .techguru-title {
         font-size: 1.05rem;
         font-weight: 900;
@@ -1353,14 +1383,12 @@ function generateFrontendHTML() {
         text-transform: uppercase;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         background: linear-gradient(
-          90deg, 
-          #00d2ff 0%, 
-          #3b82f6 18%, 
-          #8b5cf6 36%, 
-          #d946ef 52%, 
-          #ff007f 68%, 
-          #00ff87 84%, 
-          #00d2ff 100%
+          90deg,
+          #fbbf24 0%,
+          #f97316 30%,
+          #ea580c 55%,
+          #fb923c 80%,
+          #fbbf24 100%
         );
         background-size: 250% auto;
         -webkit-background-clip: text;
@@ -1433,6 +1461,8 @@ function generateFrontendHTML() {
         let currentView = '';
 
         const API_URL = window.location.origin;
+        const SUBSCRIBE_URL = "${safeSubscribeUrl}";
+        const DEMO_VIDEO_URL = "${safeDemoVideoUrl}";
 
         // ==========================================
         // TOAST NOTIFICATION SYSTEM
@@ -1492,7 +1522,7 @@ function generateFrontendHTML() {
         // ==========================================
         function getStatusBadgeClass(status) {
             switch(status) {
-                case 'Complete': return 'badge-emerald';
+                case 'Complete': return 'badge-brand';
                 case 'In Progress': return 'badge-amber';
                 case 'Quote': return 'badge-violet';
                 default: return 'badge-blue';
@@ -1523,8 +1553,40 @@ function generateFrontendHTML() {
             async navigate(view) {
                 const app = document.getElementById('app');
                 if (!token && view !== 'login') view = 'login';
+                // Subscription gate: logged-in users without an active subscription see the paywall
+                if (token && currentUser && currentUser.subscribed !== 1 && view !== 'login' && view !== 'paywall') view = 'paywall';
                 currentView = view;
                 updateNavActiveState(view);
+
+                // ── SUBSCRIPTION PAYWALL VIEW ──
+                if (view === 'paywall') {
+                    const demoBtn = DEMO_VIDEO_URL
+                        ? \`<a href="\${DEMO_VIDEO_URL}" target="_blank" rel="noopener" class="btn btn-secondary btn-block" style="margin-top:10px"><i class="fa-solid fa-play"></i> Watch the 60-second demo</a>\`
+                        : '';
+                    app.innerHTML = \`
+                        <div class="login-wrapper">
+                            <div class="login-card">
+                                <div class="login-logo">
+                                    <div class="logo-icon"><i class="fa-solid fa-hard-hat"></i></div>
+                                    <h2>Contractor Pro Suite</h2>
+                                    <p class="login-brandline">by <span>TECHGURU</span></p>
+                                    <p class="login-subtitle">CRM · Field Tracking · Reviews</p>
+                                </div>
+                                <div class="card card-elevated" style="text-align:center">
+                                    <div style="font-size:2rem; margin-bottom:10px; color:var(--accent-brand)"><i class="fa-solid fa-lock"></i></div>
+                                    <h3 style="margin-bottom:8px; font-size:1.15rem;">Subscription Required</h3>
+                                    <p style="color:var(--text-secondary); font-size:0.9rem; margin-bottom:18px; line-height:1.5">This suite is a paid product — it's not free. Subscribe to unlock the CRM, field tracking, and review dispatch for your crew.</p>
+                                    \${SUBSCRIBE_URL
+                                        ? \`<a href="\${SUBSCRIBE_URL}" target="_blank" rel="noopener" class="btn btn-primary btn-block btn-lg"><i class="fa-solid fa-credit-card"></i> Subscribe Now</a>\`
+                                        : \`<a href="https://book.techguruofficial.us/" target="_blank" rel="noopener" class="btn btn-primary btn-block btn-lg"><i class="fa-solid fa-calendar-check"></i> Talk to us to subscribe</a>\`}
+                                    \${demoBtn}
+                                    <button onclick="auth.logout()" class="btn btn-ghost btn-block" style="margin-top:10px">Log out</button>
+                                </div>
+                            </div>
+                        </div>
+                    \`;
+                    return;
+                }
 
                 // ── LOGIN VIEW ──
                 if (view === 'login') {
@@ -1534,24 +1596,25 @@ function generateFrontendHTML() {
                                 <div class="login-logo">
                                     <div class="logo-icon"><i class="fa-solid fa-hard-hat"></i></div>
                                     <h2>Contractor Pro Suite</h2>
+                                    <p class="login-brandline">by <span>TECHGURU</span></p>
                                     <p class="login-subtitle">CRM · Field Tracking · Reviews</p>
                                 </div>
                                 <div class="card card-elevated">
                                     <form id="loginForm" onsubmit="event.preventDefault(); auth.login(this.email.value, this.password.value)">
                                         <div class="input-group">
                                             <label class="label">Email Address</label>
-                                            <input name="email" type="email" value="admin@contractor.local" required class="input" placeholder="you@company.com">
+                                            <input name="email" type="email" required class="input" placeholder="you@company.com" autocomplete="email">
                                         </div>
                                         <div class="input-group">
                                             <label class="label">Password</label>
-                                            <input name="password" type="password" value="Admin123!" required class="input" placeholder="••••••••">
+                                            <input name="password" type="password" required class="input" placeholder="••••••••" autocomplete="current-password">
                                         </div>
                                         <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:8px">
                                             <i class="fa-solid fa-arrow-right-to-bracket"></i> Secure Log In
                                         </button>
                                     </form>
                                 </div>
-                                <p class="login-footer"><i class="fa-solid fa-lock" style="margin-right:4px"></i> Demo credentials prefilled · Secured with PBKDF2-SHA256</p>
+                                <p class="login-footer"><i class="fa-solid fa-lock" style="margin-right:4px"></i> Subscription required · Secured with PBKDF2-SHA256</p>
                             </div>
                         </div>
                     \`;
@@ -1589,7 +1652,7 @@ function generateFrontendHTML() {
 
                         <div class="stat-bar">
                             <div class="stat-card">
-                                <div class="stat-value text-emerald">\${formatCurrency(totalValue)}</div>
+                                <div class="stat-value text-brand">\${formatCurrency(totalValue)}</div>
                                 <div class="stat-label">Pipeline Value</div>
                             </div>
                             <div class="stat-card">
@@ -1601,7 +1664,7 @@ function generateFrontendHTML() {
                                 <div class="stat-label">Active Jobs</div>
                             </div>
                             <div class="stat-card">
-                                <div class="stat-value" style="color: var(--accent-emerald)">\${statusCounts.Complete}</div>
+                                <div class="stat-value" style="color: var(--accent-brand)">\${statusCounts.Complete}</div>
                                 <div class="stat-label">Completed</div>
                             </div>
                         </div>
@@ -1802,7 +1865,7 @@ function generateFrontendHTML() {
                                         \${logs.map(l => \`
                                             <tr>
                                                 <td style="font-weight:600;color:var(--text-primary)">\${l.crew_name}</td>
-                                                <td style="color:var(--accent-emerald)">\${l.customer_name || 'General Overhead'}</td>
+                                                <td style="color:var(--accent-brand)">\${l.customer_name || 'General Overhead'}</td>
                                                 <td style="font-size:0.75rem">\${new Date(l.clock_in).toLocaleString()}</td>
                                                 <td style="font-size:0.75rem">\${l.clock_out ? new Date(l.clock_out).toLocaleString() : '<span class="pulse-live"><span class="status-dot active"></span>ON CLOCK</span>'}</td>
                                                 <td style="font-size:0.75rem;font-style:italic;color:var(--text-tertiary)">\${l.notes || '—'}</td>
