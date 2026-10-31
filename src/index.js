@@ -133,7 +133,24 @@ export default {
     // BACKEND API ROUTER ROUTING LOGIC
     // ==========================================
     
-    // Auth Endpoint: Register User
+    // --- SUBSCRIPTION & TRIAL HELPERS ---
+    // Lazy migration: ensure subscription/trial columns exist
+    const ensureSubColumns = async () => {
+      try { await env.DB.prepare("SELECT is_subscribed, trial_ends_at FROM users LIMIT 1").all(); }
+      catch {
+        try { await env.DB.prepare("ALTER TABLE users ADD COLUMN is_subscribed INTEGER DEFAULT 0").run(); } catch (_) {}
+        try { await env.DB.prepare("ALTER TABLE users ADD COLUMN trial_ends_at TEXT").run(); } catch (_) {}
+      }
+    };
+    // Trial is active when trial_ends_at is in the future (SQLite UTC 'YYYY-MM-DD HH:MM:SS')
+    const trialIsActive = (u) => {
+      if (!u || !u.trial_ends_at) return false;
+      const iso = u.trial_ends_at.includes('T') ? u.trial_ends_at : u.trial_ends_at.replace(' ', 'T') + 'Z';
+      return new Date(iso).getTime() > Date.now();
+    };
+    const TRIAL_DAYS = 14;
+
+    // Auth Endpoint: Register User (new accounts start a 14-day free trial)
     if (url.pathname === "/api/auth/register" && request.method === "POST") {
       try {
         const { name, email, password, role } = await request.json();
@@ -143,10 +160,11 @@ export default {
         const hashedPassword = await cryptoUtils.hashPassword(password);
         const assignedRole = role === "admin" ? "admin" : "crew"; // Default protection boundary
         
-        await env.DB.prepare("INSERT INTO users (id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)")
+        await ensureSubColumns();
+        await env.DB.prepare("INSERT INTO users (id, name, email, password_hash, role, trial_ends_at) VALUES (?, ?, ?, ?, ?, datetime('now', '+" + TRIAL_DAYS + " days'))")
           .bind(id, name, email, hashedPassword, assignedRole).run();
           
-        return new Response(JSON.stringify({ success: true, userId: id }), { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        return new Response(JSON.stringify({ success: true, userId: id, trial_days: TRIAL_DAYS }), { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       } catch (err) {
         return new Response(JSON.stringify({ error: "User registration failed or email conflict", details: err.message }), { status: 400, headers: corsHeaders });
       }
@@ -188,13 +206,19 @@ export default {
         
         if (!validPassword) return new Response(JSON.stringify({ error: "Invalid credentials" }), { status: 401, headers: corsHeaders });
         
-        // Subscription gate: ensure the is_subscribed column exists, then read it
-        try { await env.DB.prepare("SELECT is_subscribed FROM users LIMIT 1").all(); }
-        catch { try { await env.DB.prepare("ALTER TABLE users ADD COLUMN is_subscribed INTEGER DEFAULT 0").run(); } catch (_) {} }
+        // Subscription + trial: ensure columns exist, then read status
+        await ensureSubColumns();
         const subscribed = user.is_subscribed === 1 ? 1 : 0;
+        // Grant a fresh trial to pre-existing accounts that never had one
+        if (!subscribed && !user.trial_ends_at) {
+          await env.DB.prepare("UPDATE users SET trial_ends_at = datetime('now', '+" + TRIAL_DAYS + " days') WHERE id = ?").bind(user.id).run();
+          const refreshed = await env.DB.prepare("SELECT trial_ends_at FROM users WHERE id = ?").bind(user.id).first();
+          user.trial_ends_at = refreshed ? refreshed.trial_ends_at : null;
+        }
+        const trial_active = trialIsActive(user);
 
-        const token = await cryptoUtils.generateJWT({ id: user.id, name: user.name, email: user.email, role: user.role, subscribed }, env.JWT_SECRET);
-        return new Response(JSON.stringify({ token, user: { name: user.name, email: user.email, role: user.role, subscribed } }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        const token = await cryptoUtils.generateJWT({ id: user.id, name: user.name, email: user.email, role: user.role, subscribed, trial_active }, env.JWT_SECRET);
+        return new Response(JSON.stringify({ token, user: { name: user.name, email: user.email, role: user.role, subscribed, trial_active, trial_ends_at: user.trial_ends_at || null } }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       } catch (err) {
         return new Response(JSON.stringify({ error: "Server login error", details: err.message }), { status: 500, headers: corsHeaders });
       }
@@ -205,6 +229,24 @@ export default {
       const user = await getAuthenticatedUser(request);
       if (!user) {
         return new Response(JSON.stringify({ error: "Unauthorized access token" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      // Fresh subscription/trial status for the current user (always allowed with a valid token)
+      if (url.pathname === "/api/auth/me" && request.method === "GET") {
+        await ensureSubColumns();
+        const fresh = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(user.id).first();
+        if (!fresh) return new Response(JSON.stringify({ error: "User not found" }), { status: 401, headers: corsHeaders });
+        const subscribed = fresh.is_subscribed === 1 ? 1 : 0;
+        const trial_active = trialIsActive(fresh);
+        return new Response(JSON.stringify({ user: { name: fresh.name, email: fresh.email, role: fresh.role, subscribed, trial_active, trial_ends_at: fresh.trial_ends_at || null } }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      // Product access enforcement: every other protected route needs an active
+      // subscription or an active trial (auth endpoints stay open for status checks)
+      if (!url.pathname.startsWith("/api/auth/")) {
+        if (user.subscribed !== 1 && user.trial_active !== true) {
+          return new Response(JSON.stringify({ error: "Active subscription or trial required", trial_required: true }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
       }
       
       // CRM Endpoint: Fetch All Customers
@@ -264,6 +306,173 @@ export default {
         const result = await env.DB.prepare("UPDATE users SET is_subscribed = 1 WHERE email = ?").bind(email).run();
         return new Response(JSON.stringify({ success: true, activated: result.changes }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
+
+      // --- CREW FILE UPLOADS (R2 object storage + D1 metadata) ---
+      // Lazy-create the uploads metadata table on first use
+      const ensureUploadsTable = async () => {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS uploads (
+          id TEXT PRIMARY KEY,
+          customer_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          content_type TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          r2_key TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        )`).run();
+      };
+
+      // Upload a file: POST /api/uploads { customer_id, filename, content_type, data (base64) }
+      if (url.pathname === "/api/uploads" && request.method === "POST") {
+        if (!env.UPLOADS) return new Response(JSON.stringify({ error: "File storage not configured on this worker" }), { status: 501, headers: corsHeaders });
+        try {
+          const { customer_id, filename, content_type, data } = await request.json();
+          if (!customer_id || !filename || !data) return new Response(JSON.stringify({ error: "Missing customer_id, filename, or data" }), { status: 400, headers: corsHeaders });
+          // Verify the customer exists
+          const customer = await env.DB.prepare("SELECT id FROM customers WHERE id = ?").bind(customer_id).first();
+          if (!customer) return new Response(JSON.stringify({ error: "Customer not found" }), { status: 404, headers: corsHeaders });
+          // Decode base64 -> bytes, enforce 10 MB cap
+          const binStr = atob(data);
+          if (binStr.length > 10 * 1024 * 1024) return new Response(JSON.stringify({ error: "File too large (10 MB max)" }), { status: 413, headers: corsHeaders });
+          const bytes = new Uint8Array(binStr.length);
+          for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+          const safeName = String(filename).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "file";
+          const id = crypto.randomUUID();
+          const r2Key = "customers/" + customer_id + "/" + id + "-" + safeName;
+          await env.UPLOADS.put(r2Key, bytes, { httpMetadata: { contentType: content_type || "application/octet-stream" } });
+          await ensureUploadsTable();
+          await env.DB.prepare("INSERT INTO uploads (id, customer_id, user_id, filename, content_type, size, r2_key) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(id, customer_id, user.id, safeName, content_type || "application/octet-stream", bytes.length, r2Key).run();
+          return new Response(JSON.stringify({ success: true, id, filename: safeName, size: bytes.length }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        } catch (err) {
+          return new Response(JSON.stringify({ error: "Upload failed", details: err.message }), { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // List files for a customer: GET /api/uploads?customer_id=...
+      if (url.pathname === "/api/uploads" && request.method === "GET") {
+        try {
+          await ensureUploadsTable();
+          const customerId = url.searchParams.get("customer_id");
+          if (!customerId) return new Response(JSON.stringify({ error: "Missing customer_id" }), { status: 400, headers: corsHeaders });
+          const { results } = await env.DB.prepare("SELECT id, customer_id, filename, content_type, size, created_at FROM uploads WHERE customer_id = ? ORDER BY created_at DESC")
+            .bind(customerId).all();
+          return new Response(JSON.stringify(results), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        } catch (err) {
+          return new Response(JSON.stringify({ error: "Failed to list uploads", details: err.message }), { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // Serve or delete a single file: GET / DELETE /api/uploads/:id
+      if (url.pathname.startsWith("/api/uploads/") && (request.method === "GET" || request.method === "DELETE")) {
+        if (!env.UPLOADS) return new Response(JSON.stringify({ error: "File storage not configured on this worker" }), { status: 501, headers: corsHeaders });
+        try {
+          await ensureUploadsTable();
+          const fileId = url.pathname.slice("/api/uploads/".length).split("/")[0];
+          const meta = await env.DB.prepare("SELECT * FROM uploads WHERE id = ?").bind(fileId).first();
+          if (!meta) return new Response(JSON.stringify({ error: "File not found" }), { status: 404, headers: corsHeaders });
+          if (request.method === "DELETE") {
+            await env.UPLOADS.delete(meta.r2_key);
+            await env.DB.prepare("DELETE FROM uploads WHERE id = ?").bind(fileId).run();
+            return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+          }
+          const obj = await env.UPLOADS.get(meta.r2_key);
+          if (!obj) return new Response(JSON.stringify({ error: "File missing from storage" }), { status: 404, headers: corsHeaders });
+          return new Response(obj.body, { headers: { ...corsHeaders, "Content-Type": meta.content_type, "Content-Disposition": 'inline; filename="' + meta.filename.replace(/"/g, "") + '"', "Cache-Control": "private, max-age=3600" } });
+        } catch (err) {
+          return new Response(JSON.stringify({ error: "File request failed", details: err.message }), { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // --- BUSINESS BRANDING (per-user logo, R2 + D1) ---
+      const ensureBrandingTable = async () => {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS branding (
+          user_id TEXT PRIMARY KEY,
+          r2_key TEXT NOT NULL,
+          updated_at TEXT DEFAULT (datetime('now'))
+        )`).run();
+      };
+
+      // Upload/replace logo: POST /api/branding/logo { filename, content_type, data (base64) }
+      if (url.pathname === "/api/branding/logo" && request.method === "POST") {
+        if (!env.UPLOADS) return new Response(JSON.stringify({ error: "File storage not configured on this worker" }), { status: 501, headers: corsHeaders });
+        try {
+          const { filename, content_type, data } = await request.json();
+          if (!data) return new Response(JSON.stringify({ error: "Missing image data" }), { status: 400, headers: corsHeaders });
+          if (!String(content_type || "").startsWith("image/")) return new Response(JSON.stringify({ error: "Logo must be an image file" }), { status: 400, headers: corsHeaders });
+          const binStr = atob(data);
+          if (binStr.length > 2 * 1024 * 1024) return new Response(JSON.stringify({ error: "Logo too large (2 MB max)" }), { status: 413, headers: corsHeaders });
+          const bytes = new Uint8Array(binStr.length);
+          for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+          const ext = String(filename || "logo.png").split(".").pop().toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 5) || "png";
+          const r2Key = "branding/" + user.id + "/logo." + ext;
+          await env.UPLOADS.put(r2Key, bytes, { httpMetadata: { contentType: content_type } });
+          await ensureBrandingTable();
+          await env.DB.prepare("INSERT INTO branding (user_id, r2_key) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET r2_key = excluded.r2_key, updated_at = datetime('now')")
+            .bind(user.id, r2Key).run();
+          return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        } catch (err) {
+          return new Response(JSON.stringify({ error: "Logo upload failed", details: err.message }), { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // Logo status: GET /api/branding/logo -> { has_logo: true/false }
+      if (url.pathname === "/api/branding/logo" && request.method === "GET") {
+        try {
+          await ensureBrandingTable();
+          const row = await env.DB.prepare("SELECT r2_key FROM branding WHERE user_id = ?").bind(user.id).first();
+          return new Response(JSON.stringify({ has_logo: !!row }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        } catch (err) {
+          return new Response(JSON.stringify({ has_logo: false }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+      }
+
+      // Serve logo bytes: GET /api/branding/logo/file
+      if (url.pathname === "/api/branding/logo/file" && request.method === "GET") {
+        if (!env.UPLOADS) return new Response(JSON.stringify({ error: "File storage not configured" }), { status: 501, headers: corsHeaders });
+        try {
+          await ensureBrandingTable();
+          const row = await env.DB.prepare("SELECT r2_key FROM branding WHERE user_id = ?").bind(user.id).first();
+          if (!row) return new Response(JSON.stringify({ error: "No logo set" }), { status: 404, headers: corsHeaders });
+          const obj = await env.UPLOADS.get(row.r2_key);
+          if (!obj) return new Response(JSON.stringify({ error: "Logo missing from storage" }), { status: 404, headers: corsHeaders });
+          return new Response(obj.body, { headers: { ...corsHeaders, "Content-Type": obj.httpMetadata?.contentType || "image/png", "Cache-Control": "private, max-age=3600" } });
+        } catch (err) {
+          return new Response(JSON.stringify({ error: "Logo fetch failed", details: err.message }), { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // Remove logo: DELETE /api/branding/logo
+      if (url.pathname === "/api/branding/logo" && request.method === "DELETE") {
+        if (!env.UPLOADS) return new Response(JSON.stringify({ error: "File storage not configured" }), { status: 501, headers: corsHeaders });
+        try {
+          await ensureBrandingTable();
+          const row = await env.DB.prepare("SELECT r2_key FROM branding WHERE user_id = ?").bind(user.id).first();
+          if (row) {
+            try { await env.UPLOADS.delete(row.r2_key); } catch (_) {}
+            await env.DB.prepare("DELETE FROM branding WHERE user_id = ?").bind(user.id).run();
+          }
+          return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        } catch (err) {
+          return new Response(JSON.stringify({ error: "Logo removal failed", details: err.message }), { status: 500, headers: corsHeaders });
+        }
+      }
+    }
+
+    // ==========================================
+    // PWA ASSETS (manifest, service worker, icons)
+    // ==========================================
+    if (request.method === "GET" && url.pathname === "/manifest.json") {
+      return new Response(PWA_MANIFEST, { headers: { ...corsHeaders, "Content-Type": "application/manifest+json", "Cache-Control": "public, max-age=3600" } });
+    }
+    if (request.method === "GET" && url.pathname === "/sw.js") {
+      return new Response(PWA_SW, { headers: { ...corsHeaders, "Content-Type": "application/javascript", "Cache-Control": "public, max-age=3600" } });
+    }
+    if (request.method === "GET" && (url.pathname === "/icons/icon-192.png" || url.pathname === "/icons/icon-512.png" || url.pathname === "/icons/icon-maskable-512.png" || url.pathname === "/apple-touch-icon.png")) {
+      if (!env.UPLOADS) return new Response("Storage not configured", { status: 501, headers: corsHeaders });
+      const obj = await env.UPLOADS.get("pwa" + url.pathname);
+      if (!obj) return new Response("Icon not found", { status: 404, headers: corsHeaders });
+      return new Response(obj.body, { headers: { ...corsHeaders, "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" } });
     }
 
     // ==========================================
@@ -286,6 +495,48 @@ const TECHGURU_LOGO_B64 = "UklGRiIQAABXRUJQVlA4IBYQAADQNwCdASpgAGAAPiUOhkIhheK1y
 // ==========================================
 // PREMIUM FRONTEND HTML GENERATOR
 // ==========================================
+
+// ==========================================
+// PWA ASSETS (Microsoft Store packaging)
+// ==========================================
+const PWA_MANIFEST = JSON.stringify({
+  name: "Contractor Pro CRM Suite by TECHGURU",
+  short_name: "Contractor Pro",
+  description: "Elevate CRM, Elevate Time, and Elevate Reviews — the all-in-one suite for contractors. Start free for 14 days.",
+  start_url: "/",
+  scope: "/",
+  display: "standalone",
+  orientation: "portrait",
+  background_color: "#0a0e17",
+  theme_color: "#f97316",
+  icons: [
+    { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+    { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+    { src: "/icons/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" }
+  ]
+});
+
+const PWA_SW = [
+  "const CACHE = 'contractor-pro-v1';",
+  "self.addEventListener('install', (e) => {",
+  "  e.waitUntil(caches.open(CACHE).then((c) => c.add('/')).then(() => self.skipWaiting()));",
+  "});",
+  "self.addEventListener('activate', (e) => {",
+  "  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));",
+  "});",
+  "self.addEventListener('fetch', (e) => {",
+  "  const url = new URL(e.request.url);",
+  "  if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;",
+  "  if (url.pathname.startsWith('/api/')) return;",
+  "  e.respondWith(",
+  "    fetch(e.request).then((resp) => {",
+  "      const copy = resp.clone();",
+  "      caches.open(CACHE).then((c) => c.put(e.request, copy));",
+  "      return resp;",
+  "    }).catch(() => caches.match(e.request).then((hit) => hit || caches.match('/')))",
+  "  );",
+  "});"
+].join("\n");
 function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
   const safeSubscribeUrl = (subscribeUrl || "").replace(/"/g, "&quot;");
   const safeDemoVideoUrl = (demoVideoUrl || "").replace(/"/g, "&quot;");
@@ -296,10 +547,17 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Contractor Pro CRM Suite · by TECHGURU</title>
     <meta name="description" content="Professional contractor CRM suite with customer management, field time tracking, review dispatch, and admin panel.">
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#f97316">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
       /* ================================================
          DESIGN SYSTEM — CSS CUSTOM PROPERTIES
@@ -800,6 +1058,107 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         display: none;
       }
 
+      /* ================================================
+         DOCUMENTS (PDF) & FILE UPLOADS
+         ================================================ */
+      .btn-sm {
+        padding: 8px 12px;
+        font-size: 0.78rem;
+        border-radius: var(--radius-md);
+      }
+      .card-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border-subtle);
+      }
+      .doc-modal {
+        max-width: 720px;
+      }
+      .pdf-frame {
+        width: 100%;
+        height: 52vh;
+        min-height: 320px;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-md);
+        background: #fff;
+      }
+      .doc-actions {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+        margin-top: 16px;
+      }
+      @media (min-width: 560px) {
+        .doc-actions { grid-template-columns: repeat(4, 1fr); }
+      }
+      .file-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .file-tile {
+        position: relative;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        background: var(--bg-input);
+        aspect-ratio: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px;
+        text-align: center;
+      }
+      .file-tile img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        position: absolute;
+        inset: 0;
+      }
+      .file-tile .file-del {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        border: none;
+        background: rgba(10, 14, 23, 0.85);
+        color: #ff6b6b;
+        cursor: pointer;
+        font-size: 0.75rem;
+        z-index: 2;
+      }
+      .file-tile .file-name {
+        font-size: 0.68rem;
+        color: var(--text-secondary);
+        word-break: break-word;
+        z-index: 1;
+      }
+      .file-tile .file-icon {
+        font-size: 1.6rem;
+        color: var(--accent-brand);
+        z-index: 1;
+      }
+      .upload-zone {
+        margin-top: 14px;
+        border: 1.5px dashed var(--border-default);
+        border-radius: var(--radius-md);
+        padding: 18px;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color var(--duration-fast);
+      }
+      .upload-zone:hover { border-color: var(--accent-brand); }
+      .upload-zone input { display: none; }
+
       .modal-content {
         background: var(--bg-secondary);
         border: 1px solid var(--border-default);
@@ -1126,6 +1485,37 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         font-size: 1.6rem;
         color: #022c22;
         box-shadow: var(--shadow-glow-brand);
+        overflow: hidden;
+      }
+      .login-logo .logo-icon img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      .brand-card {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 18px;
+      }
+      .brand-preview {
+        width: 72px;
+        height: 72px;
+        border-radius: var(--radius-md);
+        background: var(--gradient-brand);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.8rem;
+        color: #022c22;
+        overflow: hidden;
+        flex-shrink: 0;
+        border: 1px solid var(--border-default);
+      }
+      .brand-preview img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
       }
 
       .login-logo h2 {
@@ -1428,19 +1818,19 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
     <nav id="navbar" class="hidden">
         <button id="navCrm" onclick="router.navigate('crm')" class="nav-btn">
             <i class="fa-solid fa-users"></i>
-            <span>CRM</span>
+            <span>Elevate CRM</span>
         </button>
         <button id="navTracker" onclick="router.navigate('tracker')" class="nav-btn">
             <i class="fa-solid fa-clock"></i>
-            <span>Tracker</span>
+            <span>Elevate Time</span>
         </button>
         <button id="navReviews" onclick="router.navigate('reviews')" class="nav-btn">
             <i class="fa-solid fa-star"></i>
-            <span>Reviews</span>
+            <span>Elevate Reviews</span>
         </button>
         <button id="adminTabBtn" onclick="router.navigate('admin')" class="nav-btn hidden">
             <i class="fa-solid fa-shield-halved"></i>
-            <span>Admin</span>
+            <span>Elevate Admin</span>
         </button>
         <button onclick="auth.logout()" class="nav-btn nav-logout">
             <i class="fa-solid fa-right-from-bracket"></i>
@@ -1458,6 +1848,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         let token = localStorage.getItem('token') || '';
         let currentUser = JSON.parse(localStorage.getItem('user') || 'null');
         let customersData = [];
+        let lastTimesheetLogs = [];
         let currentView = '';
 
         const API_URL = window.location.origin;
@@ -1500,16 +1891,26 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     if (currentUser.role === 'admin') {
                         document.getElementById('adminTabBtn').classList.remove('hidden');
                     }
-                    showToast('Welcome back, ' + currentUser.name + '!');
+                    if (currentUser.trial_active === true && currentUser.subscribed !== 1 && currentUser.trial_ends_at) {
+                        const iso = currentUser.trial_ends_at.includes('T') ? currentUser.trial_ends_at : currentUser.trial_ends_at.replace(' ', 'T') + 'Z';
+                        const days = Math.max(1, Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000));
+                        showToast('Free trial active — ' + days + ' day' + (days === 1 ? '' : 's') + ' left', 'info');
+                    } else {
+                        showToast('Welcome back, ' + currentUser.name + '!');
+                    }
                     router.navigate('crm');
+                    branding.load();
                 } catch(e) {
                     showToast('Login Failed: ' + e.message, 'error');
                 }
             },
             logout() {
+                let brandCache = null;
+                try { brandCache = localStorage.getItem('tg_brand_logo'); } catch (e) {}
                 token = '';
                 currentUser = null;
                 localStorage.clear();
+                try { if (brandCache) localStorage.setItem('tg_brand_logo', brandCache); } catch (e) {}
                 document.getElementById('navbar').classList.add('hidden');
                 document.body.classList.remove('has-navbar');
                 document.getElementById('adminTabBtn').classList.add('hidden');
@@ -1553,8 +1954,9 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
             async navigate(view) {
                 const app = document.getElementById('app');
                 if (!token && view !== 'login') view = 'login';
-                // Subscription gate: logged-in users without an active subscription see the paywall
-                if (token && currentUser && currentUser.subscribed !== 1 && view !== 'login' && view !== 'paywall') view = 'paywall';
+                // Access gate: active subscription OR active trial; otherwise the paywall
+                const hasAccess = currentUser && (currentUser.subscribed === 1 || currentUser.trial_active === true);
+                if (token && currentUser && !hasAccess && view !== 'login' && view !== 'paywall') view = 'paywall';
                 currentView = view;
                 updateNavActiveState(view);
 
@@ -1563,6 +1965,10 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     const demoBtn = DEMO_VIDEO_URL
                         ? \`<a href="\${DEMO_VIDEO_URL}" target="_blank" rel="noopener" class="btn btn-secondary btn-block" style="margin-top:10px"><i class="fa-solid fa-play"></i> Watch the 60-second demo</a>\`
                         : '';
+                    const trialEnded = currentUser && currentUser.trial_ends_at && currentUser.trial_active !== true;
+                    const paywallText = trialEnded
+                        ? 'Your free 14-day trial has ended. Subscribe to keep Elevate CRM, Elevate Time, and Elevate Reviews working for your crew.'
+                        : "This suite is a paid product — it's not free. Subscribe to unlock Elevate CRM, Elevate Time, and Elevate Reviews for your crew.";
                     app.innerHTML = \`
                         <div class="login-wrapper">
                             <div class="login-card">
@@ -1570,12 +1976,12 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                                     <div class="logo-icon"><i class="fa-solid fa-hard-hat"></i></div>
                                     <h2>Contractor Pro Suite</h2>
                                     <p class="login-brandline">by <span>TECHGURU</span></p>
-                                    <p class="login-subtitle">CRM · Field Tracking · Reviews</p>
+                                    <p class="login-subtitle">Elevate CRM · Elevate Time · Elevate Reviews</p>
                                 </div>
                                 <div class="card card-elevated" style="text-align:center">
                                     <div style="font-size:2rem; margin-bottom:10px; color:var(--accent-brand)"><i class="fa-solid fa-lock"></i></div>
                                     <h3 style="margin-bottom:8px; font-size:1.15rem;">Subscription Required</h3>
-                                    <p style="color:var(--text-secondary); font-size:0.9rem; margin-bottom:18px; line-height:1.5">This suite is a paid product — it's not free. Subscribe to unlock the CRM, field tracking, and review dispatch for your crew.</p>
+                                    <p style="color:var(--text-secondary); font-size:0.9rem; margin-bottom:18px; line-height:1.5">\${paywallText}</p>
                                     \${SUBSCRIBE_URL
                                         ? \`<a href="\${SUBSCRIBE_URL}" target="_blank" rel="noopener" class="btn btn-primary btn-block btn-lg"><i class="fa-solid fa-credit-card"></i> Subscribe Now</a>\`
                                         : \`<a href="https://book.techguruofficial.us/" target="_blank" rel="noopener" class="btn btn-primary btn-block btn-lg"><i class="fa-solid fa-calendar-check"></i> Talk to us to subscribe</a>\`}
@@ -1585,6 +1991,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                             </div>
                         </div>
                     \`;
+                    branding.applyCached();
                     return;
                 }
 
@@ -1597,7 +2004,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                                     <div class="logo-icon"><i class="fa-solid fa-hard-hat"></i></div>
                                     <h2>Contractor Pro Suite</h2>
                                     <p class="login-brandline">by <span>TECHGURU</span></p>
-                                    <p class="login-subtitle">CRM · Field Tracking · Reviews</p>
+                                    <p class="login-subtitle">Elevate CRM · Elevate Time · Elevate Reviews</p>
                                 </div>
                                 <div class="card card-elevated">
                                     <form id="loginForm" onsubmit="event.preventDefault(); auth.login(this.email.value, this.password.value)">
@@ -1614,10 +2021,11 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                                         </button>
                                     </form>
                                 </div>
-                                <p class="login-footer"><i class="fa-solid fa-lock" style="margin-right:4px"></i> Subscription required · Secured with PBKDF2-SHA256</p>
+                                <p class="login-footer"><i class="fa-solid fa-lock" style="margin-right:4px"></i> Start free for 14 days · Secured with PBKDF2-SHA256</p>
                             </div>
                         </div>
                     \`;
+                    branding.applyCached();
                     return;
                 }
 
@@ -1642,7 +2050,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     app.innerHTML = \`
                         <div class="page-header">
                             <div>
-                                <h1>Customer Matrix</h1>
+                                <h1>Elevate CRM</h1>
                                 <p class="subtitle">\${customersData.length} total clients · Manage jobs & leads</p>
                             </div>
                             <button onclick="document.getElementById('crmModal').classList.remove('hidden')" class="btn btn-primary">
@@ -1728,6 +2136,10 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                                             <div class="amount-label">Contract</div>
                                         </div>
                                     </div>
+                                    <div class="card-actions">
+                                        <button onclick="docs.workOrderByIndex(\${i})" class="btn btn-secondary btn-sm"><i class="fa-solid fa-file-pdf"></i> Work Order PDF</button>
+                                        <button onclick="crewFiles.openByIndex(\${i})" class="btn btn-secondary btn-sm"><i class="fa-solid fa-folder-open"></i> Files <span id="fileCount-\${c.id}"></span></button>
+                                    </div>
                                 </div>
                             \`).join('')}
                         </div>
@@ -1739,7 +2151,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     app.innerHTML = \`
                         <div class="page-header">
                             <div>
-                                <h1>Field Time Tracker</h1>
+                                <h1>Elevate Time</h1>
                                 <p class="subtitle">Clock in & out of job sites</p>
                             </div>
                         </div>
@@ -1785,7 +2197,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     app.innerHTML = \`
                         <div class="page-header">
                             <div>
-                                <h1>Review Dispatch</h1>
+                                <h1>Elevate Reviews</h1>
                                 <p class="subtitle">Generate review traffic before leaving the site</p>
                             </div>
                         </div>
@@ -1825,6 +2237,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     try {
                         const res = await fetch(API_URL + '/api/admin/timesheets', { headers: { 'Authorization': 'Bearer ' + token } });
                         logs = await res.json();
+                        lastTimesheetLogs = Array.isArray(logs) ? logs : [];
                     } catch(e) {
                         showToast('Failed to load timesheet data', 'error');
                     }
@@ -1832,8 +2245,27 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     app.innerHTML = \`
                         <div class="page-header">
                             <div>
-                                <h1><i class="fa-solid fa-shield-halved" style="color:var(--accent-violet);margin-right:8px"></i>Admin Panel</h1>
+                                <h1><i class="fa-solid fa-shield-halved" style="color:var(--accent-violet);margin-right:8px"></i>Elevate Admin</h1>
                                 <p class="subtitle">Complete labor hours audit trail</p>
+                            </div>
+                            <button onclick="docs.timesheetReport()" class="btn btn-primary">
+                                <i class="fa-solid fa-file-pdf"></i> Export PDF
+                            </button>
+                        </div>
+
+                        <div class="card" style="margin-bottom:18px">
+                            <h3 style="margin-bottom:4px;font-size:1rem;"><i class="fa-solid fa-palette" style="color:var(--accent-brand);margin-right:8px"></i>Business branding</h3>
+                            <p class="subtitle" style="margin-bottom:12px">Your logo appears on the login screen and your PDFs. Swap it anytime.</p>
+                            <div class="brand-card">
+                                <div class="brand-preview" id="brandPreviewImg"><i class="fa-solid fa-hard-hat"></i></div>
+                                <div>
+                                    <label class="btn btn-secondary btn-sm" style="cursor:pointer">
+                                        <i class="fa-solid fa-upload"></i> Upload logo
+                                        <input type="file" id="brandFileInput" accept="image/*" style="display:none" onchange="branding.upload(this)">
+                                    </label>
+                                    <button id="brandRemoveBtn" onclick="branding.remove()" class="btn btn-ghost btn-sm" style="margin-left:8px;display:none"><i class="fa-solid fa-trash"></i> Remove</button>
+                                    <div id="brandStatus" style="margin-top:8px;font-size:0.78rem;color:var(--text-secondary)"></div>
+                                </div>
                             </div>
                         </div>
 
@@ -1876,6 +2308,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                             </div>
                         </div>
                     \`;
+                    branding.renderPreview();
                 }
             },
 
@@ -1951,19 +2384,495 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         };
 
         // ==========================================
+        // DOCUMENTS (PDF) — work orders & timesheet reports
+        // Print / Share / Email / Save, generated on-device with jsPDF
+        // ==========================================
+        const docs = {
+            current: null,
+
+            jspdf() {
+                if (!window.jspdf || !window.jspdf.jsPDF) { showToast('PDF engine still loading — try again in a moment', 'error'); return null; }
+                return new window.jspdf.jsPDF({ unit: 'pt', format: 'letter' });
+            },
+
+            brandHeader(doc, title, subtitle) {
+                doc.setFillColor(249, 115, 22);
+                doc.rect(0, 0, 612, 64, 'F');
+                let tx = 40;
+                try {
+                    if (typeof branding !== 'undefined' && branding.logoDataUrl) {
+                        const m = /^data:image\\/(png|jpeg|jpg);/i.exec(branding.logoDataUrl);
+                        if (m) {
+                            const fmt = m[1].toLowerCase() === 'png' ? 'PNG' : 'JPEG';
+                            doc.addImage(branding.logoDataUrl, fmt, 40, 12, 40, 40);
+                            tx = 92;
+                        }
+                    }
+                } catch (e) {}
+                doc.setTextColor(255, 255, 255);
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(20);
+                doc.text('TECHGURU', tx, 30);
+                doc.setFontSize(10);
+                doc.setFont('helvetica', 'normal');
+                doc.text('Contractor Pro Suite', 40, 48);
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(16);
+                doc.text(title, 572, 30, { align: 'right' });
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(10);
+                doc.text(subtitle || '', 572, 48, { align: 'right' });
+                doc.setTextColor(30, 30, 30);
+            },
+
+            docFooter(doc, dateStr) {
+                doc.setFontSize(9);
+                doc.setTextColor(140, 140, 140);
+                doc.text('Generated by Contractor Pro Suite · by TECHGURU · ' + dateStr, 40, 760);
+                doc.setTextColor(30, 30, 30);
+            },
+
+            buildWorkOrder(c) {
+                const doc = this.jspdf();
+                if (!doc) return null;
+                const dateStr = new Date().toLocaleDateString();
+                this.brandHeader(doc, 'WORK ORDER', dateStr);
+                let y = 100;
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(13);
+                doc.text('Client', 40, y);
+                y += 20;
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(11);
+                const lines = [c.name || '', c.address || 'No address saved', ((c.phone ? 'Ph: ' + c.phone : '') + (c.email ? '   ' + c.email : ''))];
+                lines.forEach(function (ln) { if (ln) { doc.text(String(ln).slice(0, 80), 40, y); y += 16; } });
+                y += 10;
+                doc.setFillColor(245, 245, 245);
+                doc.rect(40, y - 14, 532, 52, 'F');
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(11);
+                doc.text('Status: ' + (c.status || 'Lead'), 52, y + 6);
+                doc.text('Contract value: ' + formatCurrency(c.invoice_value), 52, y + 26);
+                y += 70;
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(13);
+                doc.text('Scope of work', 40, y);
+                y += 18;
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(11);
+                doc.setTextColor(120, 120, 120);
+                doc.text('Describe scope, materials, and terms here before sending to the client.', 40, y);
+                doc.setTextColor(30, 30, 30);
+                y = Math.max(y + 60, 560);
+                doc.line(40, y, 260, y);
+                doc.line(352, y, 572, y);
+                doc.setFontSize(10);
+                doc.text('Client signature / date', 40, y + 16);
+                doc.text('Contractor signature / date', 352, y + 16);
+                this.docFooter(doc, dateStr);
+                return doc;
+            },
+
+            buildTimesheet(logs) {
+                const doc = this.jspdf();
+                if (!doc) return null;
+                const dateStr = new Date().toLocaleDateString();
+                this.brandHeader(doc, 'TIMESHEET REPORT', dateStr);
+                let y = 100;
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(10);
+                doc.setFillColor(249, 115, 22);
+                doc.setTextColor(255, 255, 255);
+                doc.rect(40, y - 12, 532, 20, 'F');
+                doc.text('Crew', 48, y + 2);
+                doc.text('Site', 150, y + 2);
+                doc.text('Clock in', 300, y + 2);
+                doc.text('Clock out', 420, y + 2);
+                doc.text('Hours', 530, y + 2);
+                doc.setTextColor(30, 30, 30);
+                doc.setFont('helvetica', 'normal');
+                y += 22;
+                let totalHrs = 0;
+                logs.forEach(function (l) {
+                    if (y > 720) { doc.addPage(); y = 60; }
+                    const hrs = l.clock_out ? (new Date(l.clock_out) - new Date(l.clock_in)) / 3600000 : 0;
+                    totalHrs += hrs;
+                    doc.setFontSize(9);
+                    doc.text(String(l.crew_name || '').slice(0, 18), 48, y);
+                    doc.text(String(l.customer_name || 'Overhead').slice(0, 20), 150, y);
+                    doc.text(String(new Date(l.clock_in).toLocaleString()).slice(0, 20), 300, y);
+                    doc.text(l.clock_out ? String(new Date(l.clock_out).toLocaleString()).slice(0, 20) : 'ON CLOCK', 420, y);
+                    doc.text(l.clock_out ? hrs.toFixed(2) : '--', 530, y);
+                    y += 16;
+                });
+                y += 10;
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(11);
+                doc.text('Total entries: ' + logs.length + '    Total hours: ' + totalHrs.toFixed(2), 40, y);
+                this.docFooter(doc, dateStr);
+                return doc;
+            },
+
+            openPreview(title, filename, doc) {
+                if (!doc) return;
+                const blob = doc.output('blob');
+                if (this.current && this.current.url) URL.revokeObjectURL(this.current.url);
+                const url = URL.createObjectURL(blob);
+                this.current = { blob: blob, url: url, filename: filename, title: title };
+                let modal = document.getElementById('docModal');
+                if (!modal) {
+                    modal = document.createElement('div');
+                    modal.id = 'docModal';
+                    modal.className = 'modal-overlay hidden';
+                    document.body.appendChild(modal);
+                }
+                modal.innerHTML =
+                    '<div class="modal-content doc-modal">' +
+                    '<h3 style="margin-bottom:4px;font-size:1.15rem;">' + title + '</h3>' +
+                    '<p class="subtitle" style="margin-bottom:12px">' + filename + '</p>' +
+                    '<iframe class="pdf-frame" src="' + url + '"></iframe>' +
+                    '<div class="doc-actions">' +
+                    '<button onclick="docs.printDoc()" class="btn btn-primary btn-sm"><i class="fa-solid fa-print"></i> Print</button>' +
+                    '<button onclick="docs.shareDoc()" class="btn btn-blue btn-sm"><i class="fa-solid fa-share-nodes"></i> Share</button>' +
+                    '<button onclick="docs.emailDoc()" class="btn btn-secondary btn-sm"><i class="fa-solid fa-envelope"></i> Email</button>' +
+                    '<button onclick="docs.downloadDoc()" class="btn btn-ghost btn-sm"><i class="fa-solid fa-download"></i> Save</button>' +
+                    '</div>' +
+                    '<button onclick="this.closest(&quot;.modal-overlay&quot;).classList.add(&quot;hidden&quot;)" class="btn btn-ghost btn-block" style="margin-top:12px">Close</button>' +
+                    '</div>';
+                modal.classList.remove('hidden');
+            },
+
+            printDoc() {
+                if (!this.current) return;
+                const ifr = document.createElement('iframe');
+                ifr.style.position = 'fixed';
+                ifr.style.right = '0';
+                ifr.style.bottom = '0';
+                ifr.style.width = '0';
+                ifr.style.height = '0';
+                ifr.style.border = '0';
+                ifr.src = this.current.url;
+                ifr.onload = function () { setTimeout(function () { ifr.contentWindow.focus(); ifr.contentWindow.print(); }, 400); };
+                document.body.appendChild(ifr);
+                setTimeout(function () { if (ifr.parentNode) ifr.parentNode.removeChild(ifr); }, 60000);
+                showToast('Print dialog opened — print it or save as PDF');
+            },
+
+            downloadDoc() {
+                if (!this.current) return;
+                const a = document.createElement('a');
+                a.href = this.current.url;
+                a.download = this.current.filename;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            },
+
+            shareDoc() {
+                if (!this.current) return;
+                const self = this;
+                const file = new File([this.current.blob], this.current.filename, { type: 'application/pdf' });
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    navigator.share({ files: [file], title: this.current.title, text: this.current.title + ' — via Contractor Pro Suite' }).catch(function () {});
+                } else {
+                    self.downloadDoc();
+                    showToast('Sharing is not supported here — PDF downloaded instead', 'info');
+                }
+            },
+
+            emailDoc() {
+                if (!this.current) return;
+                this.downloadDoc();
+                const subject = encodeURIComponent(this.current.title + ' — ' + this.current.filename);
+                const body = encodeURIComponent('Hi,\\n\\nPlease see the attached document (' + this.current.filename + '). It was just downloaded to this device — attach it to this email before sending.\\n\\n— Sent via Contractor Pro Suite by TECHGURU');
+                window.location.href = 'mailto:?subject=' + subject + '&body=' + body;
+                showToast('PDF downloaded — attach it to the email', 'info');
+            },
+
+            workOrderByIndex(i) {
+                const c = customersData[i];
+                if (!c) { showToast('Client not found', 'error'); return; }
+                const doc = this.buildWorkOrder(c);
+                const safe = String(c.name || 'client').replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 40);
+                this.openPreview('Work Order — ' + c.name, 'work-order-' + safe + '.pdf', doc);
+            },
+
+            timesheetReport() {
+                if (!lastTimesheetLogs.length) { showToast('No timesheet entries to export', 'info'); return; }
+                const doc = this.buildTimesheet(lastTimesheetLogs);
+                this.openPreview('Timesheet Report', 'timesheet-report-' + new Date().toISOString().slice(0, 10) + '.pdf', doc);
+            }
+        };
+
+        // ==========================================
+        // CREW FILE UPLOADS — site photos & documents per client
+        // ==========================================
+        const crewFiles = {
+            customerId: null,
+            customerName: '',
+
+            esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); },
+
+            authHeaders() { return { 'Authorization': 'Bearer ' + token }; },
+
+            openByIndex(i) {
+                const c = customersData[i];
+                if (!c) { showToast('Client not found', 'error'); return; }
+                this.customerId = c.id;
+                this.customerName = c.name;
+                let modal = document.getElementById('filesModal');
+                if (!modal) {
+                    modal = document.createElement('div');
+                    modal.id = 'filesModal';
+                    modal.className = 'modal-overlay hidden';
+                    document.body.appendChild(modal);
+                }
+                modal.innerHTML =
+                    '<div class="modal-content">' +
+                    '<h3 style="margin-bottom:4px;font-size:1.15rem;"><i class="fa-solid fa-folder-open" style="color:var(--accent-brand);margin-right:8px"></i>Files</h3>' +
+                    '<p class="subtitle" style="margin-bottom:8px">' + this.esc(c.name) + ' — site photos & documents</p>' +
+                    '<div id="fileGrid" class="file-grid"></div>' +
+                    '<label class="upload-zone">' +
+                    '<i class="fa-solid fa-cloud-arrow-up" style="font-size:1.4rem;color:var(--accent-brand)"></i>' +
+                    '<div style="margin-top:8px;font-size:0.85rem">Tap to upload a photo or document</div>' +
+                    '<div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">Images, PDF, Word, text — 10 MB max</div>' +
+                    '<input type="file" id="fileInput" accept="image/*,.pdf,.doc,.docx,.txt,.csv" onchange="crewFiles.upload(this)">' +
+                    '</label>' +
+                    '<div id="uploadStatus" style="margin-top:10px;font-size:0.8rem;color:var(--text-secondary)"></div>' +
+                    '<button onclick="this.closest(&quot;.modal-overlay&quot;).classList.add(&quot;hidden&quot;)" class="btn btn-ghost btn-block" style="margin-top:12px">Close</button>' +
+                    '</div>';
+                modal.classList.remove('hidden');
+                this.refresh();
+            },
+
+            refresh() {
+                const grid = document.getElementById('fileGrid');
+                if (!grid) return;
+                const self = this;
+                grid.innerHTML = '<p class="subtitle">Loading…</p>';
+                fetch(API_URL + '/api/uploads?customer_id=' + encodeURIComponent(this.customerId), { headers: this.authHeaders() })
+                    .then(function (res) {
+                        if (res.status === 501) { grid.innerHTML = '<p class="subtitle">File storage is being connected — check back soon.</p>'; return []; }
+                        return res.json();
+                    })
+                    .then(function (list) {
+                        if (!list || !list.length) { grid.innerHTML = '<p class="subtitle" style="grid-column:1/-1">No files yet. Upload the first site photo.</p>'; return; }
+                        grid.innerHTML = '';
+                        list.forEach(function (f) {
+                            const tile = document.createElement('div');
+                            tile.className = 'file-tile';
+                            const url = API_URL + '/api/uploads/' + f.id;
+                            if ((f.content_type || '').indexOf('image/') === 0) {
+                                tile.innerHTML = '<img src="' + url + '" alt="' + self.esc(f.filename) + '" loading="lazy">';
+                            } else {
+                                tile.innerHTML = '<div class="file-icon"><i class="fa-solid fa-file-lines"></i></div><div class="file-name">' + self.esc(f.filename) + '</div>';
+                            }
+                            const del = document.createElement('button');
+                            del.className = 'file-del';
+                            del.title = 'Delete';
+                            del.innerHTML = '<i class="fa-solid fa-trash"></i>';
+                            del.onclick = function (e) { e.stopPropagation(); self.del(f.id); };
+                            tile.appendChild(del);
+                            tile.onclick = function () { window.open(url, '_blank'); };
+                            grid.appendChild(tile);
+                        });
+                        const badge = document.getElementById('fileCount-' + self.customerId);
+                        if (badge) badge.textContent = '(' + list.length + ')';
+                    })
+                    .catch(function () { grid.innerHTML = '<p class="subtitle">Could not load files.</p>'; });
+            },
+
+            upload(input) {
+                const file = input.files && input.files[0];
+                if (!file) return;
+                const self = this;
+                if (file.size > 10 * 1024 * 1024) { showToast('File too large (10 MB max)', 'error'); input.value = ''; return; }
+                const status = document.getElementById('uploadStatus');
+                if (status) status.textContent = 'Uploading ' + file.name + '…';
+                const reader = new FileReader();
+                reader.onload = function () {
+                    const base64 = String(reader.result).split(',')[1];
+                    fetch(API_URL + '/api/uploads', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                        body: JSON.stringify({ customer_id: self.customerId, filename: file.name, content_type: file.type || 'application/octet-stream', data: base64 })
+                    })
+                        .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+                        .then(function (r) {
+                            if (!r.ok) { showToast((r.data && r.data.error) || 'Upload failed', 'error'); }
+                            else { showToast('File uploaded'); self.refresh(); }
+                            if (status) status.textContent = '';
+                            input.value = '';
+                        })
+                        .catch(function () { showToast('Upload failed', 'error'); if (status) status.textContent = ''; input.value = ''; });
+                };
+                reader.readAsDataURL(file);
+            },
+
+            del(id) {
+                const self = this;
+                if (!confirm('Delete this file?')) return;
+                fetch(API_URL + '/api/uploads/' + id, { method: 'DELETE', headers: this.authHeaders() })
+                    .then(function () { showToast('File deleted'); self.refresh(); })
+                    .catch(function () { showToast('Delete failed', 'error'); });
+            }
+        };
+
+        // ==========================================
+        // BUSINESS BRANDING — per-user logo (login tile, PDFs), swappable anytime
+        // ==========================================
+        const branding = {
+            logoDataUrl: null,
+            cacheKey: 'tg_brand_logo',
+
+            applyToTiles() {
+                if (!this.logoDataUrl) return;
+                const url = this.logoDataUrl;
+                document.querySelectorAll('.logo-icon').forEach(function (tile) {
+                    tile.innerHTML = '<img src="' + url + '" alt="Business logo">';
+                });
+            },
+
+            applyCached() {
+                try {
+                    const cached = localStorage.getItem(this.cacheKey);
+                    if (cached) { this.logoDataUrl = cached; this.applyToTiles(); }
+                } catch (e) {}
+            },
+
+            async load() {
+                const gen = (this._gen = (this._gen || 0) + 1);
+                try {
+                    const res = await fetch(API_URL + '/api/branding/logo', { headers: { 'Authorization': 'Bearer ' + token } });
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    if (!data.has_logo) { this.clear(false); return; }
+                    const img = await fetch(API_URL + '/api/branding/logo/file', { headers: { 'Authorization': 'Bearer ' + token } });
+                    if (!img.ok) return;
+                    const blob = await img.blob();
+                    const reader = new FileReader();
+                    const self = this;
+                    reader.onload = function () {
+                        if (gen !== self._gen) return; // a remove/upload happened while loading
+                        self.logoDataUrl = String(reader.result);
+                        try { localStorage.setItem(self.cacheKey, self.logoDataUrl); } catch (e) {}
+                        self.applyToTiles();
+                        self.renderPreview();
+                    };
+                    reader.readAsDataURL(blob);
+                } catch (e) {}
+            },
+
+            upload(input) {
+                const file = input.files && input.files[0];
+                const self = this;
+                if (!file) return;
+                if (!file.type || file.type.indexOf('image/') !== 0) { showToast('Please choose an image file', 'error'); input.value = ''; return; }
+                const objUrl = URL.createObjectURL(file);
+                const img = new Image();
+                img.onload = function () {
+                    URL.revokeObjectURL(objUrl);
+                    const maxDim = 512;
+                    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+                    const w = Math.max(1, Math.round((img.naturalWidth || 512) * scale));
+                    const h = Math.max(1, Math.round((img.naturalHeight || 512) * scale));
+                    const canvas = document.createElement('canvas');
+                    canvas.width = w;
+                    canvas.height = h;
+                    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                    const dataUrl = canvas.toDataURL('image/png');
+                    const base64 = dataUrl.split(',')[1];
+                    const status = document.getElementById('brandStatus');
+                    if (status) status.textContent = 'Uploading logo…';
+                    fetch(API_URL + '/api/branding/logo', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                        body: JSON.stringify({ filename: file.name, content_type: 'image/png', data: base64 })
+                    })
+                    .then(function (res) { return res.json().then(function (d) { return { ok: res.ok, d: d }; }); })
+                    .then(function (r) {
+                        if (!r.ok) { showToast((r.d && r.d.error) || 'Logo upload failed', 'error'); }
+                        else {
+                            showToast('Logo updated — it is now on your login screen and PDFs');
+                            self._gen = (self._gen || 0) + 1; // cancel any in-flight load()
+                            self.logoDataUrl = dataUrl;
+                            try { localStorage.setItem(self.cacheKey, dataUrl); } catch (e) {}
+                            self.applyToTiles();
+                            self.renderPreview();
+                        }
+                        if (status) status.textContent = '';
+                        input.value = '';
+                    })
+                    .catch(function () { showToast('Logo upload failed', 'error'); if (status) status.textContent = ''; input.value = ''; });
+                };
+                img.onerror = function () { URL.revokeObjectURL(objUrl); showToast('Could not read that image', 'error'); input.value = ''; };
+                img.src = objUrl;
+            },
+
+            async remove() {
+                if (!confirm('Remove your business logo and go back to the default icon?')) return;
+                try {
+                    await fetch(API_URL + '/api/branding/logo', { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } });
+                } catch (e) {}
+                this.clear(true);
+                showToast('Logo removed');
+            },
+
+            clear(updatePreview) {
+                this._gen = (this._gen || 0) + 1; // cancel any in-flight load()
+                this.logoDataUrl = null;
+                try { localStorage.removeItem(this.cacheKey); } catch (e) {}
+                document.querySelectorAll('.logo-icon').forEach(function (tile) {
+                    tile.innerHTML = '<i class="fa-solid fa-hard-hat"></i>';
+                });
+                if (updatePreview) this.renderPreview();
+            },
+
+            renderPreview() {
+                const prev = document.getElementById('brandPreviewImg');
+                if (!prev) return;
+                if (this.logoDataUrl) prev.innerHTML = '<img src="' + this.logoDataUrl + '" alt="Business logo">';
+                else prev.innerHTML = '<i class="fa-solid fa-hard-hat"></i>';
+                const rm = document.getElementById('brandRemoveBtn');
+                if (rm) rm.style.display = this.logoDataUrl ? '' : 'none';
+            }
+        };
+
+        // ==========================================
         // APP INITIALIZATION
         // ==========================================
-        if (token && currentUser) {
-            document.getElementById('navbar').classList.remove('hidden');
-            document.body.classList.add('has-navbar');
-            if (currentUser.role === 'admin') {
-                document.getElementById('adminTabBtn').classList.remove('hidden');
+        (async function init() {
+            // Register the service worker for PWA installability (Microsoft Store)
+            if ('serviceWorker' in navigator) {
+                window.addEventListener('load', function () {
+                    navigator.serviceWorker.register('/sw.js').catch(function () {});
+                });
             }
-            router.navigate('crm');
-        } else {
-            document.body.classList.remove('has-navbar');
-            router.navigate('login');
-        }
+            if (token && currentUser) {
+                document.getElementById('navbar').classList.remove('hidden');
+                document.body.classList.add('has-navbar');
+                if (currentUser.role === 'admin') {
+                    document.getElementById('adminTabBtn').classList.remove('hidden');
+                }
+                // Refresh subscription/trial status (a trial may have expired since last visit)
+                try {
+                    const meRes = await fetch(API_URL + '/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } });
+                    if (meRes.status === 401) { auth.logout(); return; }
+                    if (meRes.ok) {
+                        const meData = await meRes.json();
+                        if (meData.user) {
+                            currentUser = meData.user;
+                            localStorage.setItem('user', JSON.stringify(currentUser));
+                        }
+                    }
+                } catch (e) {}
+                router.navigate('crm');
+                branding.load();
+            } else {
+                document.body.classList.remove('has-navbar');
+                router.navigate('login');
+            }
+        })();
     </script>
 </body>
 </html>`;
