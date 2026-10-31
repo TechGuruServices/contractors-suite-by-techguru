@@ -472,7 +472,7 @@ export default {
       if (!env.UPLOADS) return new Response("Storage not configured", { status: 501, headers: corsHeaders });
       const obj = await env.UPLOADS.get("pwa" + url.pathname);
       if (!obj) return new Response("Icon not found", { status: 404, headers: corsHeaders });
-      return new Response(obj.body, { headers: { ...corsHeaders, "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" } });
+      return new Response(obj.body, { headers: { ...corsHeaders, "Content-Type": "image/png", "Cache-Control": "public, max-age=3600" } });
     }
 
     // ==========================================
@@ -502,7 +502,7 @@ const TECHGURU_LOGO_B64 = "UklGRiIQAABXRUJQVlA4IBYQAADQNwCdASpgAGAAPiUOhkIhheK1y
 const PWA_MANIFEST = JSON.stringify({
   name: "Contractor Pro CRM Suite by TECHGURU",
   short_name: "Contractor Pro",
-  description: "Elevate CRM, Elevate Time, and Elevate Reviews — the all-in-one suite for contractors. Start free for 14 days.",
+  description: "Elevate CRM, Field Time Tracker, and Review Dispatch — the all-in-one suite for contractors. Start free for 14 days.",
   start_url: "/",
   scope: "/",
   display: "standalone",
@@ -1822,15 +1822,15 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         </button>
         <button id="navTracker" onclick="router.navigate('tracker')" class="nav-btn">
             <i class="fa-solid fa-clock"></i>
-            <span>Elevate Time</span>
+            <span>Field Time Tracker</span>
         </button>
         <button id="navReviews" onclick="router.navigate('reviews')" class="nav-btn">
             <i class="fa-solid fa-star"></i>
-            <span>Elevate Reviews</span>
+            <span>Review Dispatch</span>
         </button>
         <button id="adminTabBtn" onclick="router.navigate('admin')" class="nav-btn hidden">
             <i class="fa-solid fa-shield-halved"></i>
-            <span>Elevate Admin</span>
+            <span>Admin Panel</span>
         </button>
         <button onclick="auth.logout()" class="nav-btn nav-logout">
             <i class="fa-solid fa-right-from-bracket"></i>
@@ -1967,8 +1967,8 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                         : '';
                     const trialEnded = currentUser && currentUser.trial_ends_at && currentUser.trial_active !== true;
                     const paywallText = trialEnded
-                        ? 'Your free 14-day trial has ended. Subscribe to keep Elevate CRM, Elevate Time, and Elevate Reviews working for your crew.'
-                        : "This suite is a paid product — it's not free. Subscribe to unlock Elevate CRM, Elevate Time, and Elevate Reviews for your crew.";
+                        ? 'Your free 14-day trial has ended. Subscribe to keep Elevate CRM, Field Time Tracker, and Review Dispatch working for your crew.'
+                        : "This suite is a paid product — it's not free. Subscribe to unlock Elevate CRM, Field Time Tracker, and Review Dispatch for your crew.";
                     app.innerHTML = \`
                         <div class="login-wrapper">
                             <div class="login-card">
@@ -1976,7 +1976,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                                     <div class="logo-icon"><i class="fa-solid fa-hard-hat"></i></div>
                                     <h2>Contractor Pro Suite</h2>
                                     <p class="login-brandline">by <span>TECHGURU</span></p>
-                                    <p class="login-subtitle">Elevate CRM · Elevate Time · Elevate Reviews</p>
+                                    <p class="login-subtitle">Elevate CRM · Field Time Tracker · Review Dispatch</p>
                                 </div>
                                 <div class="card card-elevated" style="text-align:center">
                                     <div style="font-size:2rem; margin-bottom:10px; color:var(--accent-brand)"><i class="fa-solid fa-lock"></i></div>
@@ -2004,7 +2004,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                                     <div class="logo-icon"><i class="fa-solid fa-hard-hat"></i></div>
                                     <h2>Contractor Pro Suite</h2>
                                     <p class="login-brandline">by <span>TECHGURU</span></p>
-                                    <p class="login-subtitle">Elevate CRM · Elevate Time · Elevate Reviews</p>
+                                    <p class="login-subtitle">Elevate CRM · Field Time Tracker · Review Dispatch</p>
                                 </div>
                                 <div class="card card-elevated">
                                     <form id="loginForm" onsubmit="event.preventDefault(); auth.login(this.email.value, this.password.value)">
@@ -2151,7 +2151,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     app.innerHTML = \`
                         <div class="page-header">
                             <div>
-                                <h1>Elevate Time</h1>
+                                <h1>Field Time Tracker</h1>
                                 <p class="subtitle">Clock in & out of job sites</p>
                             </div>
                         </div>
@@ -2197,7 +2197,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     app.innerHTML = \`
                         <div class="page-header">
                             <div>
-                                <h1>Elevate Reviews</h1>
+                                <h1>Review Dispatch</h1>
                                 <p class="subtitle">Generate review traffic before leaving the site</p>
                             </div>
                         </div>
@@ -2245,7 +2245,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     app.innerHTML = \`
                         <div class="page-header">
                             <div>
-                                <h1><i class="fa-solid fa-shield-halved" style="color:var(--accent-violet);margin-right:8px"></i>Elevate Admin</h1>
+                                <h1><i class="fa-solid fa-shield-halved" style="color:var(--accent-violet);margin-right:8px"></i>Admin Panel</h1>
                                 <p class="subtitle">Complete labor hours audit trail</p>
                             </div>
                             <button onclick="docs.timesheetReport()" class="btn btn-primary">
