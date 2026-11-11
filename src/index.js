@@ -462,6 +462,14 @@ export default {
     // ==========================================
     // PWA ASSETS (manifest, service worker, icons)
     // ==========================================
+    // robots.txt — keep search crawlers out of the auth-gated API.
+    // Google Search Console reported 401s on /api/* (e.g. /api/uploads,
+    // /api/branding/logo/file) because the SPA fallback served the app
+    // shell for /robots.txt, so no crawl rules existed. The API requires
+    // auth by design; this just stops crawlers from trying it.
+    if (request.method === "GET" && url.pathname === "/robots.txt") {
+      return new Response("User-agent: *\nDisallow: /api/\n", { headers: { "Content-Type": "text/plain", "Cache-Control": "public, max-age=3600" } });
+    }
     if (request.method === "GET" && url.pathname === "/manifest.json") {
       return new Response(PWA_MANIFEST, { headers: { ...corsHeaders, "Content-Type": "application/manifest+json", "Cache-Control": "public, max-age=3600" } });
     }
