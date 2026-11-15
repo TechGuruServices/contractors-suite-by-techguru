@@ -563,7 +563,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Manrope:wght@400;500;600;700;800&family=Sora:wght@600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
@@ -571,12 +571,12 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
          DESIGN SYSTEM — CSS CUSTOM PROPERTIES
          ================================================ */
       :root {
-        /* Core palette — Deep dark with safety-orange construction accents */
-        --bg-primary: #0a0e17;
-        --bg-secondary: #111827;
-        --bg-card: #151d2e;
-        --bg-card-hover: #1a2438;
-        --bg-input: #0d1220;
+        /* Core palette — Premium dark charcoal (Direction A) with safety-orange accent only */
+        --bg-primary: #0a0a0c;
+        --bg-secondary: #131316;
+        --bg-card: #1a1a1f;
+        --bg-card-hover: #26262d;
+        --bg-input: #101013;
         --bg-overlay: rgba(0, 0, 0, 0.75);
 
         /* Borders & dividers */
@@ -605,8 +605,8 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         --accent-violet: #a78bfa;
 
         /* Gradients */
-        --gradient-hero: linear-gradient(135deg, #0a0e17 0%, #111827 50%, #0d1b2a 100%);
-        --gradient-card: linear-gradient(145deg, #151d2e 0%, #111827 100%);
+        --gradient-hero: linear-gradient(135deg, #0a0a0c 0%, #131316 50%, #141419 100%);
+        --gradient-card: linear-gradient(145deg, #1e1e24 0%, #17171b 100%);
         --gradient-brand: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
         --gradient-blue: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);
         --gradient-rose: linear-gradient(135deg, #fb7185 0%, #f43f5e 100%);
@@ -650,7 +650,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
       }
 
       body {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        font-family: 'Manrope', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         background: var(--gradient-hero);
         color: var(--text-primary);
         min-height: 100vh;
@@ -981,7 +981,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         justify-content: space-around;
         align-items: center;
         padding: 8px 4px 12px;
-        background: rgba(10, 14, 23, 0.85);
+        background: rgba(10, 10, 12, 0.85);
         backdrop-filter: blur(20px);
         -webkit-backdrop-filter: blur(20px);
         border-top: 1px solid var(--border-subtle);
@@ -999,7 +999,10 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         flex-direction: column;
         align-items: center;
         gap: 3px;
-        padding: 6px 12px;
+        flex: 1 1 0;
+        min-width: 0;
+        text-align: center;
+        padding: 6px 4px;
         background: none;
         border: none;
         cursor: pointer;
@@ -1311,6 +1314,179 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         text-transform: uppercase;
         letter-spacing: 0.1em;
         color: var(--text-muted);
+      }
+
+      /* ================================================
+         DASHBOARD HOME — Direction A (KPI dashboard)
+         Premium dark charcoal; safety orange is the accent only.
+         ================================================ */
+      h1, h2, h3, .stat-value, .kpi-value {
+        font-family: 'Sora', 'Manrope', 'Inter', sans-serif;
+        letter-spacing: -0.02em;
+      }
+
+      .dash-hero {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 20px;
+        animation: slideDown var(--duration-normal) var(--ease-smooth);
+      }
+
+      .dash-hero h1 { font-size: 1.7rem; font-weight: 800; }
+      .dash-hero .subtitle { margin-top: 4px; }
+
+      .dash-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+
+      .dash-date-chip {
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: var(--text-secondary);
+        background: var(--bg-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-full);
+        padding: 8px 14px;
+        white-space: nowrap;
+      }
+      .dash-date-chip i { margin-right: 6px; color: var(--accent-brand); }
+
+      .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+        margin-bottom: 20px;
+      }
+
+      .kpi-card {
+        background: var(--gradient-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: 20px;
+        padding: 18px;
+        position: relative;
+        overflow: hidden;
+        box-shadow: var(--shadow-md);
+        transition: transform var(--duration-normal) var(--ease-smooth), border-color var(--duration-normal) var(--ease-smooth), box-shadow var(--duration-normal) var(--ease-smooth);
+        animation: slideUp var(--duration-normal) var(--ease-smooth);
+        animation-fill-mode: both;
+        cursor: pointer;
+      }
+
+      .kpi-card:hover {
+        transform: translateY(-2px);
+        border-color: var(--border-accent);
+        box-shadow: var(--shadow-lg), var(--shadow-glow-brand);
+      }
+
+      .kpi-card:nth-child(2) { animation-delay: 0.05s; }
+      .kpi-card:nth-child(3) { animation-delay: 0.1s; }
+      .kpi-card:nth-child(4) { animation-delay: 0.15s; }
+
+      .kpi-icon {
+        width: 38px; height: 38px;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 12px;
+        font-size: 1rem;
+        margin-bottom: 12px;
+      }
+
+      .kpi-icon-brand { background: rgba(249, 115, 22, 0.14); color: var(--accent-brand); }
+      .kpi-icon-amber { background: rgba(251, 191, 36, 0.12); color: var(--accent-amber); }
+      .kpi-icon-blue { background: rgba(96, 165, 250, 0.12); color: var(--accent-blue); }
+      .kpi-icon-violet { background: rgba(167, 139, 250, 0.12); color: var(--accent-violet); }
+
+      .kpi-value { font-size: 1.6rem; font-weight: 800; line-height: 1.1; }
+      .kpi-label { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-secondary); margin-top: 4px; white-space: nowrap; }
+      .kpi-sub { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+
+      .dash-grid {
+        display: grid;
+        grid-template-columns: 1.15fr 1fr;
+        gap: 14px;
+        margin-bottom: 20px;
+      }
+
+      .dash-panel {
+        background: var(--gradient-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: 20px;
+        padding: 18px;
+        box-shadow: var(--shadow-md);
+      }
+
+      .dash-panel h3 { font-size: 1rem; font-weight: 700; margin-bottom: 4px; }
+      .dash-panel .panel-sub { font-size: 0.78rem; color: var(--text-muted); margin-bottom: 14px; }
+
+      .dash-grid > *, .kpi-grid > * { min-width: 0; }
+
+      .pipe-row { margin-bottom: 14px; }
+      .pipe-row:last-child { margin-bottom: 0; }
+      .pipe-top { display: flex; justify-content: space-between; gap: 8px; font-size: 0.8rem; margin-bottom: 6px; }
+      .pipe-top span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .pipe-top .pipe-val { white-space: nowrap; }
+      .pipe-top .pipe-val { font-weight: 700; color: var(--text-primary); }
+      .pipe-track { height: 8px; background: rgba(255,255,255,0.06); border-radius: var(--radius-full); overflow: hidden; }
+      .pipe-fill { height: 100%; border-radius: var(--radius-full); transition: width var(--duration-slow) var(--ease-smooth); }
+      .pipe-fill-brand { background: var(--gradient-brand); }
+      .pipe-fill-amber { background: var(--accent-amber); }
+      .pipe-fill-blue { background: var(--accent-blue); }
+      .pipe-fill-violet { background: var(--accent-violet); }
+
+      .attention-list { display: flex; flex-direction: column; gap: 8px; }
+      .attention-row {
+        display: flex; align-items: center; gap: 12px;
+        background: var(--bg-input);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-lg);
+        padding: 12px;
+        cursor: pointer;
+        transition: border-color var(--duration-normal) var(--ease-smooth), background var(--duration-normal) var(--ease-smooth), transform var(--duration-normal) var(--ease-smooth);
+      }
+      .attention-row:hover { border-color: var(--border-accent); background: var(--bg-card-hover); transform: translateY(-1px); }
+      .attention-row .att-chevron { color: var(--text-muted); font-size: 0.8rem; flex: 0 0 auto; }
+      .attention-row .att-icon {
+        width: 32px; height: 32px; flex: 0 0 32px;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 10px;
+        background: rgba(249, 115, 22, 0.12); color: var(--accent-brand);
+        font-size: 0.85rem;
+      }
+      .attention-row .att-body { flex: 1; min-width: 0; }
+      .attention-row .att-name { font-size: 0.85rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .attention-row .att-why { font-size: 0.72rem; color: var(--text-muted); }
+
+      .shortcut-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+      .shortcut-btn {
+        display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+        background: var(--gradient-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: 20px;
+        padding: 16px;
+        color: var(--text-primary);
+        font-family: inherit; text-align: left; cursor: pointer;
+        box-shadow: var(--shadow-md);
+        transition: transform var(--duration-normal) var(--ease-smooth), border-color var(--duration-normal) var(--ease-smooth);
+      }
+      .shortcut-btn:hover { transform: translateY(-2px); border-color: var(--border-accent); }
+      .shortcut-btn i { font-size: 1.1rem; color: var(--accent-brand); }
+      .shortcut-btn span { font-size: 0.85rem; font-weight: 700; }
+      .shortcut-btn small { font-size: 0.72rem; color: var(--text-muted); }
+
+      .dash-empty { text-align: center; padding: 28px 20px; }
+      .dash-empty i { font-size: 2rem; color: var(--accent-brand); margin-bottom: 12px; }
+      .dash-empty p { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 16px; }
+
+      @media (max-width: 760px) {
+        .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .dash-grid { grid-template-columns: 1fr; }
+        .shortcut-row { grid-template-columns: 1fr; }
+        .dash-hero h1 { font-size: 1.4rem; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .kpi-card, .dash-hero { animation: none; }
+        .pipe-fill { transition: none; }
       }
 
       /* ================================================
@@ -1824,6 +2000,10 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
 
     <!-- Bottom Navigation Bar -->
     <nav id="navbar" class="hidden">
+        <button id="navDashboard" onclick="router.navigate('dashboard')" class="nav-btn">
+            <i class="fa-solid fa-gauge-high"></i>
+            <span>Dashboard</span>
+        </button>
         <button id="navCrm" onclick="router.navigate('crm')" class="nav-btn">
             <i class="fa-solid fa-users"></i>
             <span>Elevate CRM</span>
@@ -1906,7 +2086,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     } else {
                         showToast('Welcome back, ' + currentUser.name + '!');
                     }
-                    router.navigate('crm');
+                    router.navigate('dashboard');
                     branding.load();
                 } catch(e) {
                     showToast('Login Failed: ' + e.message, 'error');
@@ -1948,7 +2128,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
 
         function updateNavActiveState(view) {
             document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
-            const map = { crm: 'navCrm', tracker: 'navTracker', reviews: 'navReviews', admin: 'adminTabBtn' };
+            const map = { dashboard: 'navDashboard', crm: 'navCrm', tracker: 'navTracker', reviews: 'navReviews', admin: 'adminTabBtn' };
             if (map[view]) {
                 const el = document.getElementById(map[view]);
                 if (el) el.classList.add('active');
@@ -2038,7 +2218,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                 }
 
                 // Hydrate customer data across views
-                if (['crm', 'tracker', 'reviews'].includes(view)) {
+                if (['dashboard', 'crm', 'tracker', 'reviews'].includes(view)) {
                     try {
                         const res = await fetch(API_URL + '/api/customers', { headers: { 'Authorization': 'Bearer ' + token } });
                         if (res.status === 401) { auth.logout(); return; }
@@ -2047,6 +2227,129 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                         showToast('Failed to load customer data', 'error');
                         return;
                     }
+                }
+
+                // ── DASHBOARD VIEW (Direction A — KPI dashboard home) ──
+                // All figures are computed live from /api/customers (and, for admins,
+                // /api/admin/timesheets). Nothing here is hardcoded: an empty account
+                // (production, 0 clients) renders $0 / 0s plus the empty state below.
+                if (view === 'dashboard') {
+                    // Best-effort hours for admins (timesheets are admin-only)
+                    if (currentUser.role === 'admin') {
+                        try {
+                            const tRes = await fetch(API_URL + '/api/admin/timesheets', { headers: { 'Authorization': 'Bearer ' + token } });
+                            if (tRes.ok) lastTimesheetLogs = await tRes.json();
+                        } catch (e) {}
+                    }
+                    const totalValue = customersData.reduce((sum, c) => sum + parseFloat(c.invoice_value || 0), 0);
+                    const statusCounts = { Lead: 0, Quote: 0, 'In Progress': 0, Complete: 0 };
+                    customersData.forEach(c => { if (statusCounts[c.status] !== undefined) statusCounts[c.status]++; });
+                    const reviewsPending = statusCounts.Complete;
+                    const hoursLogged = lastTimesheetLogs.reduce((sum, l) => sum + (l.clock_out ? (new Date(l.clock_out) - new Date(l.clock_in)) / 3600000 : 0), 0);
+                    const hour = new Date().getHours();
+                    const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+                    const firstName = (currentUser.name || 'there').split(' ')[0];
+                    const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+                    const pipeStatuses = ['Lead', 'Quote', 'In Progress', 'Complete'];
+                    const pipeFill = { 'Lead': 'pipe-fill-blue', 'Quote': 'pipe-fill-violet', 'In Progress': 'pipe-fill-amber', 'Complete': 'pipe-fill-brand' };
+                    const maxPipe = Math.max(1, ...pipeStatuses.map(s => customersData.filter(c => c.status === s).reduce((sum, c) => sum + parseFloat(c.invoice_value || 0), 0)));
+                    const attention = [];
+                    customersData.forEach(c => {
+                        if (c.status === 'Lead') attention.push({ c, why: 'New lead — follow up & send a quote', icon: 'fa-user-plus', action: "router.navigate('crm')", label: 'Open in CRM' });
+                        else if (c.status === 'Quote') attention.push({ c, why: 'Quote out — waiting on a decision', icon: 'fa-file-signature', action: "router.navigate('crm')", label: 'Open in CRM' });
+                        else if (c.status === 'In Progress') attention.push({ c, why: 'Job in progress — track crew time', icon: 'fa-clock', action: "router.navigate('tracker')", label: 'Clock in' });
+                        else if (c.status === 'Complete') attention.push({ c, why: 'Job complete — ask for a review', icon: 'fa-star', action: "router.navigate('reviews')", label: 'Request review' });
+                    });
+
+                    app.innerHTML = \`
+                        <div class="dash-hero">
+                            <div>
+                                <h1>\${greeting}, \${firstName}</h1>
+                                <p class="subtitle">Here is what is happening across your jobs today.</p>
+                            </div>
+                            <div class="dash-chips">
+                                <span class="dash-date-chip"><i class="fa-solid fa-calendar-day"></i>\${todayStr}</span>
+                                \${currentUser.role === 'admin' && lastTimesheetLogs.length ? \`<span class="dash-date-chip"><i class="fa-solid fa-clock"></i>\${hoursLogged.toFixed(1)} hrs logged</span>\` : ''}
+                            </div>
+                        </div>
+
+                        <div class="kpi-grid">
+                            <div class="kpi-card" onclick="router.navigate('crm')">
+                                <div class="kpi-icon kpi-icon-brand"><i class="fa-solid fa-sack-dollar"></i></div>
+                                <div class="kpi-value">\${formatCurrency(totalValue)}</div>
+                                <div class="kpi-label">Pipeline Value</div>
+                                <div class="kpi-sub">Across \${customersData.length} client\${customersData.length === 1 ? '' : 's'}</div>
+                            </div>
+                            <div class="kpi-card" onclick="router.navigate('crm')">
+                                <div class="kpi-icon kpi-icon-amber"><i class="fa-solid fa-helmet-safety"></i></div>
+                                <div class="kpi-value">\${statusCounts['In Progress']}</div>
+                                <div class="kpi-label">Active Jobs</div>
+                                <div class="kpi-sub">\${statusCounts.Quote} quote\${statusCounts.Quote === 1 ? '' : 's'} out</div>
+                            </div>
+                            <div class="kpi-card" onclick="router.navigate('crm')">
+                                <div class="kpi-icon kpi-icon-blue"><i class="fa-solid fa-user-plus"></i></div>
+                                <div class="kpi-value">\${statusCounts.Lead}</div>
+                                <div class="kpi-label">New Leads</div>
+                                <div class="kpi-sub">Ready for follow-up</div>
+                            </div>
+                            <div class="kpi-card" onclick="router.navigate('reviews')">
+                                <div class="kpi-icon kpi-icon-violet"><i class="fa-solid fa-star"></i></div>
+                                <div class="kpi-value">\${reviewsPending}</div>
+                                <div class="kpi-label">Reviews to Request</div>
+                                <div class="kpi-sub">\${statusCounts.Complete} job\${statusCounts.Complete === 1 ? '' : 's'} complete</div>
+                            </div>
+                        </div>
+
+                        <div class="dash-grid">
+                            \${customersData.length === 0 ? \`
+                            <div class="dash-panel dash-empty" style="grid-column: 1 / -1">
+                                <div><i class="fa-solid fa-hard-hat"></i></div>
+                                <h3>No jobs yet</h3>
+                                <p>Add your first client and your pipeline, jobs and reviews will show up here.</p>
+                                <button onclick="router.navigate('crm')" class="btn btn-primary"><i class="fa-solid fa-plus"></i> Add your first client</button>
+                            </div>\` : \`
+                            <div class="dash-panel">
+                                <h3>Pipeline breakdown</h3>
+                                <p class="panel-sub">Contract value by stage</p>
+                                \${pipeStatuses.map(s => {
+                                    const v = customersData.filter(c => c.status === s).reduce((sum, c) => sum + parseFloat(c.invoice_value || 0), 0);
+                                    const n = statusCounts[s];
+                                    const w = v > 0 ? Math.max(4, Math.round((v / maxPipe) * 100)) : 0;
+                                    return \`<div class="pipe-row">
+                                        <div class="pipe-top"><span>\${s} · \${n}</span><span class="pipe-val">\${formatCurrency(v)}</span></div>
+                                        <div class="pipe-track"><div class="pipe-fill \${pipeFill[s]}" style="width:\${w}%"></div></div>
+                                    </div>\`;
+                                }).join('')}
+                            </div>
+                            <div class="dash-panel">
+                                <h3>Needs attention</h3>
+                                <p class="panel-sub">The next move on each job</p>
+                                <div class="attention-list">
+                                    \${attention.length === 0 ? '<div class="dash-empty"><p style="margin-bottom:0">All caught up — nothing needs attention.</p></div>' : attention.slice(0, 5).map(a => \`
+                                    <div class="attention-row" onclick="\${a.action}">
+                                        <div class="att-icon"><i class="fa-solid \${a.icon}"></i></div>
+                                        <div class="att-body">
+                                            <div class="att-name">\${a.c.name}</div>
+                                            <div class="att-why">\${a.why}</div>
+                                        </div>
+                                        <i class="fa-solid fa-chevron-right att-chevron"></i>
+                                    </div>\`).join('')}
+                                </div>
+                            </div>\`}
+                        </div>
+
+                        <div class="shortcut-row">
+                            <button class="shortcut-btn" onclick="router.navigate('crm')">
+                                <i class="fa-solid fa-users"></i><span>New client</span><small>Add a lead or job to the pipeline</small>
+                            </button>
+                            <button class="shortcut-btn" onclick="router.navigate('tracker')">
+                                <i class="fa-solid fa-clock"></i><span>Clock in</span><small>Start the timer on a job site</small>
+                            </button>
+                            <button class="shortcut-btn" onclick="router.navigate('reviews')">
+                                <i class="fa-solid fa-star"></i><span>Request a review</span><small>Text or email a finished client</small>
+                            </button>
+                        </div>
+                    \`;
                 }
 
                 // ── CRM VIEW ──
@@ -2240,7 +2543,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
 
                 // ── ADMIN VIEW ──
                 if (view === 'admin') {
-                    if (currentUser.role !== 'admin') { router.navigate('crm'); return; }
+                    if (currentUser.role !== 'admin') { router.navigate('dashboard'); return; }
                     let logs = [];
                     try {
                         const res = await fetch(API_URL + '/api/admin/timesheets', { headers: { 'Authorization': 'Bearer ' + token } });
@@ -2874,7 +3177,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                         }
                     }
                 } catch (e) {}
-                router.navigate('crm');
+                router.navigate('dashboard');
                 branding.load();
             } else {
                 document.body.classList.remove('has-navbar');

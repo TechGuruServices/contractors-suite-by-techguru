@@ -1,9 +1,19 @@
 # HANDOFF — contractors-suite-by-techguru
 
-## Current state snapshot (Oct 31, 2026 ~16:10 MDT)
-- Live demo: https://contractor-crm-suite.techguruofficial.workers.dev/ (Worker `contractor-crm-suite`)
+## Current state snapshot (Nov 15, 2026 ~08:32 MST)
+- Live demo: https://demo.crm.techguruofficial.us (Worker `contractor-crm-demo`); production: https://crm.techguruofficial.us (Worker `contractor-crm-suite`)
 - Repo: TechGuruServices/contractors-suite-by-techguru, branch `main`, source `src/index.js`
-- Latest change: Elevate renames + PDF printout + file uploads + business branding + 14-day trial + PWA packaging (see below), pushed by TECHGURU-MUSE
+- Latest change (UNMERGED PR — see below): Direction A KPI dashboard home, built by TECHGURU-MUSE from repo `main` head 447d7c9. Nothing deployed; Lucas reviews/merges the PR himself. Microsoft Store listing untouched (PWA wrapper picks up the web UI when deployed).
+
+## HANDOFF: 2026-11-15 15:32 UTC / 08:32 MST (TECHGURU-MUSE)
+Direction A — KPI dashboard home (Lucas picked A on Nov 15, after rejecting the v1 previews as flat / early-Replit; v2 preview artifact `contractor-pro-interface-previews` is the design reference):
+- **Source reconciled first:** repo `main` src/index.js (136,527 bytes, blob SHA 3872a7c8103240e7fe524c47dbfd66fdb4c55ffc, head 447d7c9) is the NEWEST source — it already has the 14-day trial, /api/auth/me, branding, uploads, PDF and orange theme. Local ~/workspace/contractor-crm-suite/src-index.js (emerald, no gate) is the OLDEST copy and local work-index.js is the Oct 31 rebrand-only intermediate; neither was used. The Nov 3 live-bundle download matches this lineage. This PR is built ONLY on repo `main`.
+- **New Dashboard home view** (`router.navigate('dashboard')`, first nav button, default landing after login and on app init): greeting by time of day + date chip, 4 tappable KPI cards (Pipeline Value, Active Jobs, New Leads, Reviews to Request), pipeline breakdown bars by status (Lead/Quote/In Progress/Complete), Needs-attention queue (tappable rows: Lead→CRM, Quote→CRM, In Progress→Tracker, Complete→Reviews), and 3 shortcuts (New client, Clock in, Request a review). Hours-logged chip shows for admins when timesheet data loads.
+- **All figures are computed live from /api/customers** (and /api/admin/timesheets for admin hours) — nothing is hardcoded. Empty account (production, 0 clients) renders $0 / 0s plus a "No jobs yet — Add your first client" state, verified by render test.
+- **Premium dark system (v2 tokens):** charcoal surfaces (#0a0a0c / #131316 / #1a1a1f / #26262d), safety orange #f97316 as accent only, Sora display + Manrope body (Inter kept as fallback), 20px rounded cards, soft shadows, hover lift, reduced-motion respected. Existing screens keep their layout and behavior; only the palette/fonts shifted with it.
+- **Untouched:** login, paywall/subscription gate + 14-day trial, Elevate CRM, Field Time Tracker, Review Dispatch, Admin Panel, PDF printout, crew file uploads, business branding, PWA manifest/SW, R2 icon keys (`pwa/icons/<name>`), wrangler.json placeholders. No deploy, no Store change, no main push — branch + PR only.
+- **Verified (headless Chromium render of the real worker code with mocked APIs):** node --check passes; dashboard desktop + 390px mobile (no horizontal overflow; diag scrollW == innerW), dashboard empty state, CRM, Tracker, Reviews, Admin, login, paywall — all render; KPIs match the live demo data ($11,600 pipeline, 1/1/1/1). Screenshots: ~/workspace/contractor-crm-suite/.dash-test/ (dash-demo-desktop.png, dash-demo-mobile.png, dash-empty-desktop.png, view-{crm,tracker,reviews,admin,login,paywall}.png). Known nits (pre-existing, not introduced here): Font Awesome glyphs render blank in headless screenshots only (CDN font load timing; FA dependency unchanged); Admin timesheet "Clock Out" column clips long timestamps at 680px width.
+- **To ship:** Lucas merges the PR, then deploys the worker from the merged `main` source (production bindings preserved — do NOT deploy from repo wrangler.json placeholders). Store users get the new UI automatically via the PWA wrapper; no resubmission.
 
 ## HANDOFF: 2026-10-31 ~16:10 MDT (TECHGURU-MUSE)
 Feature batch per Lucas — Elevate renames, PDF/file uploads, business branding, 14-day trial, PWA packaging:
