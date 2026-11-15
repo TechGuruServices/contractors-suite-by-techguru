@@ -1490,6 +1490,67 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
       }
 
       /* ================================================
+         STEP 6 — BIG CLOCK-IN + FIRST-RUN TOUR
+         Best of Directions B (tour) and C (mobile-first) folded into A.
+         ================================================ */
+      /* Big, sunlight-readable Clock-In shortcut on the Dashboard */
+      .shortcut-btn--clockin {
+        border-color: rgba(249, 115, 22, 0.45);
+        background: linear-gradient(135deg, rgba(249, 115, 22, 0.14) 0%, var(--bg-card) 70%);
+        min-height: 56px;
+      }
+      .shortcut-btn--clockin span { font-size: 1rem; }
+      .shortcut-btn--clockin i { font-size: 1.3rem; }
+
+      /* Big, high-contrast Clock-In / Clock-Out on the Tracker */
+      .clock-btn { min-height: 64px; }
+      .clock-btn span { font-size: 1.05rem; font-weight: 800; }
+      .clock-btn.clock-in {
+        background: var(--accent-brand);
+        color: #0a0a0c;
+      }
+      .clock-btn.clock-in i { font-size: 1.6rem; }
+      .clock-btn.clock-in:hover { background: #fb923c; box-shadow: var(--shadow-glow-brand); transform: translateY(-2px); }
+
+      /* Active-shift timer readout (session-scoped, display only) */
+      .active-timer {
+        display: flex; flex-direction: column; align-items: center; gap: 2px;
+        background: var(--bg-input);
+        border: 1px solid rgba(249, 115, 22, 0.45);
+        border-radius: var(--radius-lg);
+        padding: 14px 16px;
+        margin-bottom: 14px;
+        text-align: center;
+      }
+      .active-timer-label { font-size: 0.75rem; font-weight: 800; letter-spacing: 0.08em; color: var(--accent-brand); display: flex; align-items: center; gap: 8px; }
+      .active-timer-value { font-family: 'Sora', 'Manrope', sans-serif; font-size: 2.2rem; font-weight: 800; line-height: 1.1; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+      .active-timer-job { font-size: 0.8rem; color: var(--text-secondary); }
+
+      /* First-run tour overlay (small tooltip card + highlight ring on the real UI) */
+      .tour-dim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 60; pointer-events: none; }
+      .tour-card {
+        position: fixed; left: 16px; right: 16px; bottom: 104px; z-index: 62;
+        max-width: 480px; margin: 0 auto;
+        background: var(--bg-card); border: 1px solid rgba(249, 115, 22, 0.5);
+        border-radius: 20px; padding: 18px; box-shadow: var(--shadow-lg), var(--shadow-glow-brand);
+        animation: slideUp var(--duration-normal) var(--ease-smooth);
+      }
+      .tour-step-label { display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent-brand); margin-bottom: 8px; }
+      .tour-dots { display: flex; gap: 6px; }
+      .tour-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-accent); }
+      .tour-dot.on { background: var(--accent-brand); }
+      .tour-card h3 { font-size: 1.05rem; font-weight: 800; margin-bottom: 6px; }
+      .tour-card p { font-size: 0.88rem; line-height: 1.55; color: var(--text-secondary); margin-bottom: 14px; }
+      .tour-actions { display: flex; align-items: center; gap: 8px; }
+      .tour-highlight { position: relative; z-index: 61; outline: 3px solid var(--accent-brand) !important; outline-offset: 3px; box-shadow: 0 0 0 6px rgba(249, 115, 22, 0.25) !important; border-radius: 12px; }
+      .tour-replay-chip { cursor: pointer; font-family: inherit; }
+      .tour-replay-chip:hover { border-color: var(--border-accent); color: var(--text-primary); }
+
+      @media (prefers-reduced-motion: reduce) {
+        .tour-card { animation: none; }
+      }
+
+      /* ================================================
          CUSTOMER CARDS LIST
          ================================================ */
       .customer-list {
@@ -1816,6 +1877,10 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         .review-card { flex-direction: column; align-items: flex-start; gap: 10px; }
         .review-actions { width: 100%; }
         .review-actions .btn { flex: 1; }
+        /* Step 6: job-site Clock-In is full-width stacked, job picker is a big tap target */
+        .clock-buttons { grid-template-columns: 1fr; }
+        .clock-btn { min-height: 64px; }
+        #trackJobSelect, #trackNotes { min-height: 56px; font-size: 1rem; }
       }
 
       /* ================================================
@@ -2029,6 +2094,20 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
     <!-- Toast Container -->
     <div id="toastContainer"></div>
 
+    <!-- First-run tour overlay (Step 6 — B/C folded into A). Lives outside #app so view re-renders never wipe it. -->
+    <div id="tourDim" class="tour-dim hidden"></div>
+    <div id="tourOverlay" class="tour-card hidden" role="dialog" aria-label="Quick tour">
+        <div class="tour-step-label"><span id="tourStepNum">Step 1 of 4</span><span class="tour-dots" id="tourDots"></span></div>
+        <h3 id="tourTitle"></h3>
+        <p id="tourBody"></p>
+        <div class="tour-actions">
+            <button id="tourSkipBtn" type="button" class="btn btn-ghost btn-sm" onclick="tour.skip()">Skip tour</button>
+            <span style="flex:1"></span>
+            <button id="tourBackBtn" type="button" class="btn btn-secondary btn-sm" onclick="tour.back()">Back</button>
+            <button id="tourNextBtn" type="button" class="btn btn-primary btn-sm" onclick="tour.next()">Next</button>
+        </div>
+    </div>
+
     <script>
         // ==========================================
         // SYSTEM STATE MANAGEMENT
@@ -2141,6 +2220,8 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
         const router = {
             async navigate(view) {
                 const app = document.getElementById('app');
+                // A manual nav while the first-run tour is open dismisses it (counts as seen — never replays uninvited)
+                if (tour.active && !tour._internalNav) tour.end(true);
                 if (!token && view !== 'login') view = 'login';
                 // Access gate: active subscription OR active trial; otherwise the paywall
                 const hasAccess = currentUser && (currentUser.subscribed === 1 || currentUser.trial_active === true);
@@ -2270,6 +2351,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                             <div class="dash-chips">
                                 <span class="dash-date-chip"><i class="fa-solid fa-calendar-day"></i>\${todayStr}</span>
                                 \${currentUser.role === 'admin' && lastTimesheetLogs.length ? \`<span class="dash-date-chip"><i class="fa-solid fa-clock"></i>\${hoursLogged.toFixed(1)} hrs logged</span>\` : ''}
+                                <button type="button" class="dash-date-chip tour-replay-chip" onclick="tour.start()" title="Replay the quick tour"><i class="fa-solid fa-route"></i>Replay tour</button>
                             </div>
                         </div>
 
@@ -2339,17 +2421,19 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                         </div>
 
                         <div class="shortcut-row">
-                            <button class="shortcut-btn" onclick="router.navigate('crm')">
+                            <button class="shortcut-btn" id="shortcutNewClient" onclick="router.navigate('crm')">
                                 <i class="fa-solid fa-users"></i><span>New client</span><small>Add a lead or job to the pipeline</small>
                             </button>
-                            <button class="shortcut-btn" onclick="router.navigate('tracker')">
+                            <button class="shortcut-btn shortcut-btn--clockin" id="shortcutClockIn" onclick="router.navigate('tracker')">
                                 <i class="fa-solid fa-clock"></i><span>Clock in</span><small>Start the timer on a job site</small>
                             </button>
-                            <button class="shortcut-btn" onclick="router.navigate('reviews')">
+                            <button class="shortcut-btn" id="shortcutReviews" onclick="router.navigate('reviews')">
                                 <i class="fa-solid fa-star"></i><span>Request a review</span><small>Text or email a finished client</small>
                             </button>
                         </div>
                     \`;
+                    // First-run tour (Step 6): auto-show once for a brand-new account only
+                    tour.maybeAutoShow();
                 }
 
                 // ── CRM VIEW ──
@@ -2364,7 +2448,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                                 <h1>Elevate CRM</h1>
                                 <p class="subtitle">\${customersData.length} total clients · Manage jobs & leads</p>
                             </div>
-                            <button onclick="document.getElementById('crmModal').classList.remove('hidden')" class="btn btn-primary">
+                            <button id="crmNewClientBtn" onclick="document.getElementById('crmModal').classList.remove('hidden')" class="btn btn-primary">
                                 <i class="fa-solid fa-plus"></i> New Client
                             </button>
                         </div>
@@ -2475,6 +2559,13 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                                     <h2>\${currentUser.name}</h2>
                                 </div>
 
+                                <!-- Active-shift timer readout (Step 6; session-scoped, display only) -->
+                                <div id="activeTimer" class="active-timer hidden">
+                                    <span class="active-timer-label"><span class="status-dot active"></span>ON CLOCK</span>
+                                    <span class="active-timer-value" id="activeTimerValue">00:00:00</span>
+                                    <span class="active-timer-job" id="activeTimerJob"></span>
+                                </div>
+
                                 <form onsubmit="event.preventDefault();">
                                     <div class="input-group">
                                         <label class="label">Assign Job Site</label>
@@ -2488,7 +2579,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                                         <input id="trackNotes" type="text" class="input" placeholder="Framing, material run, cleanup...">
                                     </div>
                                     <div class="clock-buttons">
-                                        <button onclick="router.clockIn()" type="button" class="clock-btn clock-in">
+                                        <button id="clockInBtn" onclick="router.clockIn()" type="button" class="clock-btn clock-in">
                                             <i class="fa-solid fa-play"></i>
                                             <span>Clock In</span>
                                         </button>
@@ -2501,6 +2592,15 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                             </div>
                         </div>
                     \`;
+                    // Resume the session timer readout if a shift started earlier this session
+                    if (clockInStartedAt) {
+                        const _timerBox = document.getElementById('activeTimer');
+                        const _timerJob = document.getElementById('activeTimerJob');
+                        if (_timerBox) _timerBox.classList.remove('hidden');
+                        if (_timerJob) _timerJob.textContent = clockInJobLabel;
+                        renderActiveTimer();
+                        if (!clockTimerId) clockTimerId = setInterval(renderActiveTimer, 1000);
+                    }
                 }
 
                 // ── REVIEWS VIEW ──
@@ -2514,7 +2614,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                         </div>
 
                         <div class="customer-list">
-                            \${customersData.length === 0 ? '<div class="empty-state"><i class="fa-solid fa-star"></i><p>No clients available for review requests.</p></div>' : ''}
+                            \${customersData.length === 0 ? '<div class="empty-state" id="reviewsEmptyState"><i class="fa-solid fa-star"></i><p>No clients available for review requests.</p></div>' : ''}
                             \${customersData.map((c, i) => \`
                                 <div class="card customer-card review-card" style="animation-delay: \${i * 0.05}s">
                                     <div style="min-width:0; flex:1">
@@ -2658,6 +2758,8 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     const data = await res.json();
                     if (data.error) { showToast(data.error, 'error'); return; }
                     showToast('Successfully Clocked In! ⏱️');
+                    const _jobSel = document.getElementById('trackJobSelect');
+                    startActiveTimer(_jobSel && _jobSel.selectedIndex > 0 ? _jobSel.options[_jobSel.selectedIndex].text : 'General Overhead / Shop Time');
                 } catch(e) {
                     showToast('Clock in failed', 'error');
                 }
@@ -2672,6 +2774,7 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     const data = await res.json();
                     if (data.error) { showToast(data.error, 'error'); return; }
                     showToast('Successfully Clocked Out! ✅');
+                    stopActiveTimer();
                 } catch(e) {
                     showToast('Clock out failed', 'error');
                 }
@@ -2691,6 +2794,117 @@ function generateFrontendHTML(subscribeUrl, demoVideoUrl) {
                     window.location.href = 'mailto:' + target + '?subject=Thank%20You!&body=' + msg;
                 }
                 showToast('Review request dispatched via ' + (type === 'sms' ? 'SMS' : 'Email') + '!');
+            }
+        };
+
+        // ==========================================
+        // ACTIVE-SHIFT TIMER (Step 6 — display only)
+        // No /api/time/active endpoint exists, so this shows elapsed time for a
+        // shift started in this browser session; it clears on clock-out. The
+        // clock-in/out API calls and the one-active-log safety constraint are
+        // untouched.
+        // ==========================================
+        let clockInStartedAt = null;
+        let clockInJobLabel = '';
+        let clockTimerId = null;
+        function fmtElapsed(ms) {
+            const s = Math.floor(ms / 1000);
+            const h = String(Math.floor(s / 3600)).padStart(2, '0');
+            const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+            const sec = String(s % 60).padStart(2, '0');
+            return h + ':' + m + ':' + sec;
+        }
+        function renderActiveTimer() {
+            const el = document.getElementById('activeTimerValue');
+            if (!el || !clockInStartedAt) return;
+            el.textContent = fmtElapsed(Date.now() - clockInStartedAt);
+        }
+        function startActiveTimer(jobLabel) {
+            clockInStartedAt = Date.now();
+            clockInJobLabel = jobLabel || 'General Overhead / Shop Time';
+            const box = document.getElementById('activeTimer');
+            const job = document.getElementById('activeTimerJob');
+            if (box) box.classList.remove('hidden');
+            if (job) job.textContent = clockInJobLabel;
+            renderActiveTimer();
+            if (clockTimerId) clearInterval(clockTimerId);
+            clockTimerId = setInterval(renderActiveTimer, 1000);
+        }
+        function stopActiveTimer() {
+            clockInStartedAt = null;
+            clockInJobLabel = '';
+            if (clockTimerId) { clearInterval(clockTimerId); clockTimerId = null; }
+            const box = document.getElementById('activeTimer');
+            if (box) box.classList.add('hidden');
+        }
+
+        // ==========================================
+        // FIRST-RUN TOUR (Step 6 — best of Direction B folded into A)
+        // 4 steps, small overlay card + highlight ring anchored to the real UI.
+        // Auto-shows ONCE for a brand-new (0-customer) account; never auto-shows
+        // on an account that already has customers. Seen state persists in
+        // localStorage under tg_tour_seen. Replay via the Dashboard chip.
+        // The overlay lives outside #app, so view re-renders never wipe it.
+        // ==========================================
+        const TOUR_KEY = 'tg_tour_seen';
+        const tour = {
+            active: false,
+            step: 0,
+            _internalNav: false,
+            steps: [
+                { view: 'dashboard', sel: '#shortcutNewClient', title: 'Add your first client', body: 'Everything starts with a client. Tap New client, add a name and a job value, and your pipeline, jobs and reviews light up from there.' },
+                { view: 'crm', sel: '#crmNewClientBtn', title: 'Add a job', body: 'A job is a client with a status and a contract value. Use New Client in Elevate CRM — Lead, Quote, In Progress or Complete — and the Dashboard pipeline tracks it.' },
+                { view: 'tracker', sel: '#clockInBtn', title: 'Clock in on site', body: 'Pick the job site, then hit the big Clock In button. The timer runs until you clock out — one active shift at a time, so you can never double-book yourself.' },
+                { view: 'reviews', sel: '.review-actions .btn, #reviewsEmptyState', title: 'Request a review', body: 'When a job is Complete, ask for the review before you leave the site. Text or email opens ready to send — reviews are what win the next job.' }
+            ],
+            seen() { try { return localStorage.getItem(TOUR_KEY) === '1'; } catch (e) { return false; } },
+            markSeen() { try { localStorage.setItem(TOUR_KEY, '1'); } catch (e) {} },
+            maybeAutoShow() {
+                // Only for a brand-new account: no customers yet, tour never seen.
+                if (this.active || this.seen()) return;
+                if (!customersData || customersData.length !== 0) return;
+                this.start();
+            },
+            start() {
+                this.active = true;
+                this.step = 0;
+                this.showStep(0);
+            },
+            async showStep(i) {
+                this.step = i;
+                const s = this.steps[i];
+                if (!s) { this.end(true); return; }
+                if (currentView !== s.view) {
+                    this._internalNav = true;
+                    try { await router.navigate(s.view); } finally { this._internalNav = false; }
+                }
+                // Re-anchor after render (small delay so the new view has painted)
+                await new Promise(r => setTimeout(r, 60));
+                if (!this.active) return; // dismissed while navigating
+                document.querySelectorAll('.tour-highlight').forEach(el => el.classList.remove('tour-highlight'));
+                const target = document.querySelector(s.sel);
+                if (target) {
+                    target.classList.add('tour-highlight');
+                    try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { try { target.scrollIntoView(); } catch (e2) {} }
+                }
+                document.getElementById('tourStepNum').textContent = 'Step ' + (i + 1) + ' of ' + this.steps.length;
+                document.getElementById('tourDots').innerHTML = this.steps.map((_, d) => '<span class="tour-dot' + (d === i ? ' on' : '') + '"></span>').join('');
+                document.getElementById('tourTitle').textContent = s.title;
+                document.getElementById('tourBody').textContent = s.body;
+                document.getElementById('tourBackBtn').style.visibility = i === 0 ? 'hidden' : 'visible';
+                document.getElementById('tourNextBtn').textContent = i === this.steps.length - 1 ? 'Finish' : 'Next';
+                document.getElementById('tourDim').classList.remove('hidden');
+                document.getElementById('tourOverlay').classList.remove('hidden');
+            },
+            next() { if (this.step >= this.steps.length - 1) this.end(true); else this.showStep(this.step + 1); },
+            back() { if (this.step > 0) this.showStep(this.step - 1); },
+            skip() { this.end(true); },
+            end(markSeen) {
+                this.active = false;
+                if (markSeen) this.markSeen();
+                document.querySelectorAll('.tour-highlight').forEach(el => el.classList.remove('tour-highlight'));
+                const o = document.getElementById('tourOverlay'); if (o) o.classList.add('hidden');
+                const d = document.getElementById('tourDim'); if (d) d.classList.add('hidden');
             }
         };
 
