@@ -141,6 +141,35 @@ export default {
         try { await env.DB.prepare("ALTER TABLE users ADD COLUMN is_subscribed INTEGER DEFAULT 0").run(); } catch (_) {}
         try { await env.DB.prepare("ALTER TABLE users ADD COLUMN trial_ends_at TEXT").run(); } catch (_) {}
       }
+      // Stripe columns (added one by one; a missing column throws, which we swallow)
+      for (const ddl of [
+        "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT",
+        "ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT",
+        "ALTER TABLE users ADD COLUMN subscription_status TEXT",
+        "ALTER TABLE users ADD COLUMN subscription_current_period_end TEXT",
+      ]) { try { await env.DB.prepare(ddl).run(); } catch (_) {} }
+      // Idempotency log for Stripe webhook deliveries (a replayed event_id is a no-op)
+      await env.DB.prepare(`CREATE TABLE IF NOT EXISTS stripe_events (
+        event_id TEXT PRIMARY KEY, type TEXT, received_at TEXT DEFAULT (datetime('now'))
+      )`).run();
+      // Paid-but-no-account-yet: checkout completed before the buyer registered.
+      // Applied on register / login / /api/auth/me, then the row is deleted.
+      await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pending_subscriptions (
+        email TEXT PRIMARY KEY, stripe_customer_id TEXT, stripe_subscription_id TEXT,
+        status TEXT, created_at TEXT DEFAULT (datetime('now'))
+      )`).run();
+    };
+    // If this email paid via Stripe before creating an account, activate it now.
+    // Returns true when a pending subscription was applied.
+    const applyPendingSubscription = async (email) => {
+      if (!email) return false;
+      const pending = await env.DB.prepare("SELECT * FROM pending_subscriptions WHERE email = ?").bind(email).first();
+      if (!pending) return false;
+      const active = pending.status === "active" || pending.status === "trialing";
+      await env.DB.prepare(`UPDATE users SET is_subscribed = ?, stripe_customer_id = ?, stripe_subscription_id = ?, subscription_status = ? WHERE email = ?`)
+        .bind(active ? 1 : 0, pending.stripe_customer_id || null, pending.stripe_subscription_id || null, pending.status || null, email).run();
+      await env.DB.prepare("DELETE FROM pending_subscriptions WHERE email = ?").bind(email).run();
+      return active;
     };
     // Trial is active when trial_ends_at is in the future (SQLite UTC 'YYYY-MM-DD HH:MM:SS')
     const trialIsActive = (u) => {
@@ -163,7 +192,9 @@ export default {
         await ensureSubColumns();
         await env.DB.prepare("INSERT INTO users (id, name, email, password_hash, role, trial_ends_at) VALUES (?, ?, ?, ?, ?, datetime('now', '+" + TRIAL_DAYS + " days'))")
           .bind(id, name, email, hashedPassword, assignedRole).run();
-          
+        // Paid before registering? Activate immediately instead of paywalling.
+        await applyPendingSubscription(email);
+
         return new Response(JSON.stringify({ success: true, userId: id, trial_days: TRIAL_DAYS }), { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       } catch (err) {
         return new Response(JSON.stringify({ error: "User registration failed or email conflict", details: err.message }), { status: 400, headers: corsHeaders });
@@ -205,9 +236,11 @@ export default {
         }
         
         if (!validPassword) return new Response(JSON.stringify({ error: "Invalid credentials" }), { status: 401, headers: corsHeaders });
-        
+
         // Subscription + trial: ensure columns exist, then read status
         await ensureSubColumns();
+        // Paid after registering? Activate now so the paywall lifts on this login.
+        await applyPendingSubscription(email);
         const subscribed = user.is_subscribed === 1 ? 1 : 0;
         // Grant a fresh trial to pre-existing accounts that never had one
         if (!subscribed && !user.trial_ends_at) {
@@ -224,6 +257,106 @@ export default {
       }
     }
 
+    // --- STRIPE WEBHOOK: automatic subscription activation ---
+    // POST /api/webhooks/stripe — NO auth token; authenticity comes only from
+    // the Stripe-Signature header verified against env.STRIPE_WEBHOOK_SECRET.
+    // Placed BEFORE the protected-route interceptor on purpose: Stripe calls
+    // this with no Bearer token, so it must never reach the auth guard.
+    // Env required (set as a Cloudflare secret, never in wrangler.json):
+    //   STRIPE_WEBHOOK_SECRET = whsec_... signing secret of the Stripe
+    //   webhook endpoint pointed at https://crm.techguruofficial.us/api/webhooks/stripe
+    //   (test mode: the test endpoint's whsec_... on the demo worker instead).
+    // Flow: checkout.session.completed activates by buyer email (or, if the
+    // buyer has no account yet, records a pending_subscriptions row that
+    // register/login apply on next sign-in). customer.subscription.* events
+    // update by stripe_customer_id so renewals, past-due and cancellations
+    // stay in sync. Every event_id is logged in stripe_events first, so a
+    // Stripe retry/replay is a 200 no-op, never a double activation.
+    // No welcome email is sent here: this app has no server-side mail path
+    // (frontend review emails are mailto: only). Stripe's own payment-link
+    // receipt is the confirmation the buyer gets today.
+    if (url.pathname === "/api/webhooks/stripe" && request.method === "POST") {
+      const fail = (status, error) => new Response(JSON.stringify({ error }), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      if (!env.STRIPE_WEBHOOK_SECRET) return fail(500, "not_configured");
+      const payload = await request.text();
+      const sigHeader = request.headers.get("stripe-signature") || "";
+      // Parse "t=<timestamp>,v1=<sig>[,v1=<sig>...]" and verify HMAC-SHA256
+      // over "<timestamp>.<raw payload>" (Stripe's documented scheme).
+      const verifyStripeSignature = async (header, rawBody, secret) => {
+        try {
+          const parts = Object.fromEntries(header.split(",").map((kv) => {
+            const i = kv.indexOf("="); return [kv.slice(0, i), kv.slice(i + 1)];
+          }));
+          const ts = parseInt(parts.t || "0", 10);
+          if (!ts || Math.abs(Date.now() / 1000 - ts) > 300) return false; // 5-min tolerance
+          const sigs = header.split(",").filter((kv) => kv.startsWith("v1=")).map((kv) => kv.slice(3));
+          if (sigs.length === 0) return false;
+          const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+          const data = new TextEncoder().encode(`${ts}.${rawBody}`);
+          for (const hex of sigs) {
+            const bytes = new Uint8Array(hex.match(/.{1,2}/g).map((b) => parseInt(b, 16)));
+            if (await crypto.subtle.verify("HMAC", key, bytes, data)) return true;
+          }
+          return false;
+        } catch { return false; }
+      };
+      if (!(await verifyStripeSignature(sigHeader, payload, env.STRIPE_WEBHOOK_SECRET))) {
+        return fail(400, "invalid_signature");
+      }
+      let event;
+      try { event = JSON.parse(payload); } catch { return fail(400, "invalid_payload"); }
+      if (!event || !event.id || !event.type) return fail(400, "invalid_event");
+      await ensureSubColumns();
+      // Idempotency first: a replayed delivery must not re-activate or re-extend.
+      const seen = await env.DB.prepare("SELECT event_id FROM stripe_events WHERE event_id = ?").bind(event.id).first();
+      if (seen) return new Response(JSON.stringify({ received: true, already_processed: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      await env.DB.prepare("INSERT OR IGNORE INTO stripe_events (event_id, type) VALUES (?, ?)").bind(event.id, event.type).run();
+
+      const activateByEmail = async (email, customerId, subscriptionId, status) => {
+        if (!email) return { applied: false, reason: "no_email" };
+        const result = await env.DB.prepare(
+          "UPDATE users SET is_subscribed = 1, stripe_customer_id = ?, stripe_subscription_id = ?, subscription_status = ? WHERE email = ?"
+        ).bind(customerId || null, subscriptionId || null, status || "active", email).run();
+        if (result.changes > 0) return { applied: true, via: "user" };
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO pending_subscriptions (email, stripe_customer_id, stripe_subscription_id, status) VALUES (?, ?, ?, ?)"
+        ).bind(email, customerId || null, subscriptionId || null, status || "active").run();
+        return { applied: true, via: "pending" };
+      };
+      const updateByCustomerId = async (customerId, subscriptionId, status, periodEndUnix) => {
+        if (!customerId) return { applied: false, reason: "no_customer" };
+        const user = await env.DB.prepare("SELECT * FROM users WHERE stripe_customer_id = ?").bind(customerId).first();
+        if (!user) return { applied: false, reason: "no_matching_user" };
+        const keepAccess = status === "active" || status === "trialing" || status === "past_due";
+        const periodEnd = periodEndUnix
+          ? new Date(periodEndUnix * 1000).toISOString().slice(0, 19).replace("T", " ")
+          : user.subscription_current_period_end || null;
+        await env.DB.prepare(
+          "UPDATE users SET is_subscribed = ?, stripe_subscription_id = ?, subscription_status = ?, subscription_current_period_end = ? WHERE id = ?"
+        ).bind(keepAccess ? 1 : 0, subscriptionId || user.stripe_subscription_id || null, status || null, periodEnd, user.id).run();
+        if (keepAccess) await env.DB.prepare("DELETE FROM pending_subscriptions WHERE email = ?").bind(user.email).run();
+        return { applied: true, via: "user", subscribed: keepAccess ? 1 : 0 };
+      };
+
+      let outcome = { received: true, ignored: true };
+      try {
+        if (event.type === "checkout.session.completed") {
+          const s = event.data.object || {};
+          const email = (s.customer_details && s.customer_details.email) || s.customer_email || null;
+          outcome = await activateByEmail(email, s.customer || null, s.subscription || null, "active");
+        } else if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") {
+          const sub = event.data.object || {};
+          outcome = await updateByCustomerId(sub.customer || null, sub.id || null, sub.status || null, sub.current_period_end || null);
+        } else if (event.type === "customer.subscription.deleted") {
+          const sub = event.data.object || {};
+          outcome = await updateByCustomerId(sub.customer || null, sub.id || null, "canceled", sub.current_period_end || null);
+        }
+      } catch (err) {
+        return fail(500, "webhook_handler_error");
+      }
+      return new Response(JSON.stringify({ received: true, type: event.type, ...outcome }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
     // --- PROTECTED ROUTE BOUNDARY INTERCEPTOR ---
     if (url.pathname.startsWith("/api/")) {
       const user = await getAuthenticatedUser(request);
@@ -234,6 +367,7 @@ export default {
       // Fresh subscription/trial status for the current user (always allowed with a valid token)
       if (url.pathname === "/api/auth/me" && request.method === "GET") {
         await ensureSubColumns();
+        await applyPendingSubscription(user.email);
         const fresh = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(user.id).first();
         if (!fresh) return new Response(JSON.stringify({ error: "User not found" }), { status: 401, headers: corsHeaders });
         const subscribed = fresh.is_subscribed === 1 ? 1 : 0;
